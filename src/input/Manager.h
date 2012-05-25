@@ -170,7 +170,7 @@ private:
 	Stream* FindStream(const string &name);
 	Stream* FindStream(ReaderFrontend* reader);
 
-	enum StreamType { TABLE_FILTER, EVENT_FILTER };
+	enum StreamType { TABLE_STREAM, EVENT_STREAM };
 	
 	map<ReaderFrontend*, Stream*> readers;
 };

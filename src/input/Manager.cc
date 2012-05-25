@@ -129,7 +129,7 @@ public:
 
 Manager::TableStream::TableStream() : Manager::Stream::Stream() 
 	{
-	stream_type = TABLE_FILTER;
+	stream_type = TABLE_STREAM;
 	
 	tab = 0;
 	itype = 0;
@@ -144,7 +144,7 @@ Manager::TableStream::TableStream() : Manager::Stream::Stream()
 Manager::EventStream::EventStream() : Manager::Stream::Stream() 
 	{
         fields = 0;
-	stream_type = EVENT_FILTER;
+	stream_type = EVENT_STREAM;
 	}
 
 Manager::EventStream::~EventStream() 
@@ -872,9 +872,9 @@ void Manager::SendEntry(ReaderFrontend* reader, Value* *vals)
 		}
 
 	int readFields;
-	if ( i->stream_type == TABLE_FILTER ) 
+	if ( i->stream_type == TABLE_STREAM ) 
 		readFields = SendEntryTable(i, vals);
-	else if ( i->stream_type == EVENT_FILTER ) 
+	else if ( i->stream_type == EVENT_STREAM ) 
 		{
 		EnumVal *type = new EnumVal(BifEnum::Input::EVENT_NEW, BifType::Enum::Input::Event);
 		readFields = SendEventStreamEvent(i, type, vals);		
@@ -894,7 +894,7 @@ int Manager::SendEntryTable(Stream* i, const Value* const *vals)
 
 	assert(i);
 
-	assert(i->stream_type == TABLE_FILTER);
+	assert(i->stream_type == TABLE_STREAM);
 	TableStream* stream = (TableStream*) i;
 
 	HashKey* idxhash = HashValues(stream->num_idx_fields, vals);
@@ -1097,10 +1097,10 @@ void Manager::EndCurrentSend(ReaderFrontend* reader)
 			i->name.c_str());
 #endif
 
-	if ( i->stream_type == EVENT_FILTER )  // nothing to do..
+	if ( i->stream_type == EVENT_STREAM )  // nothing to do..
 		return;
 
-	assert(i->stream_type == TABLE_FILTER);
+	assert(i->stream_type == TABLE_STREAM);
 	TableStream* stream = (TableStream*) i;
 
 	// lastdict contains all deleted entries and should be empty apart from that
@@ -1199,9 +1199,9 @@ void Manager::Put(ReaderFrontend* reader, Value* *vals)
 		}
 
 	int readFields;
-	if ( i->stream_type == TABLE_FILTER ) 
+	if ( i->stream_type == TABLE_STREAM ) 
 		readFields = PutTable(i, vals);
-	else if ( i->stream_type == EVENT_FILTER ) 
+	else if ( i->stream_type == EVENT_STREAM ) 
 		{
 		EnumVal *type = new EnumVal(BifEnum::Input::EVENT_NEW, BifType::Enum::Input::Event);
 		readFields = SendEventStreamEvent(i, type, vals);
@@ -1219,7 +1219,7 @@ int Manager::SendEventStreamEvent(Stream* i, EnumVal* type, const Value* const *
 	{
 	assert(i);
 
-	assert(i->stream_type == EVENT_FILTER);
+	assert(i->stream_type == EVENT_STREAM);
 	EventStream* stream = (EventStream*) i;
 
 	Val *val;
@@ -1264,7 +1264,7 @@ int Manager::PutTable(Stream* i, const Value* const *vals)
 	{
 	assert(i);
 
-	assert(i->stream_type == TABLE_FILTER);
+	assert(i->stream_type == TABLE_STREAM);
 	TableStream* stream = (TableStream*) i;	
 
 	Val* idxval = ValueToIndexVal(stream->num_idx_fields, stream->itype, vals);
@@ -1386,7 +1386,7 @@ void Manager::Clear(ReaderFrontend* reader)
 			i->name.c_str());
 #endif
 
-	assert(i->stream_type == TABLE_FILTER);
+	assert(i->stream_type == TABLE_STREAM);
 	TableStream* stream = (TableStream*) i;	
 
 	stream->tab->RemoveAll();
@@ -1405,7 +1405,7 @@ bool Manager::Delete(ReaderFrontend* reader, Value* *vals)
 	bool success = false;
 	int readVals = 0;
 
-	if ( i->stream_type == TABLE_FILTER ) 
+	if ( i->stream_type == TABLE_STREAM ) 
 		{
 		TableStream* stream = (TableStream*) i;		
 		Val* idxval = ValueToIndexVal(stream->num_idx_fields, stream->itype, vals);
@@ -1458,7 +1458,7 @@ bool Manager::Delete(ReaderFrontend* reader, Value* *vals)
 			}
 	
 		} 
-	else if ( i->stream_type == EVENT_FILTER  ) 
+	else if ( i->stream_type == EVENT_STREAM  ) 
 		{
 		EnumVal *type = new EnumVal(BifEnum::Input::EVENT_REMOVED, BifType::Enum::Input::Event);
 		readVals = SendEventStreamEvent(i, type, vals);		

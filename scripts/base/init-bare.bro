@@ -2358,6 +2358,12 @@ type X509: record {
 	issuer: string;	##< Issuer.
 	not_valid_before: time;	##< Timestamp before when certificate is not valid.
 	not_valid_after: time;	##< Timestamp after when certificate is not valid.
+	key_alg: string; ##< name of the key algorithm
+	sig_alg: string; ##< name of the signature algorithm
+	key_type: string &optional; ##< key-type, if key parseable by openssl (either rsa, dsa or ec)
+	key_length: count &optional; ##< key-length in bits  
+	exponent: string &optional; ##< exponent, if RSA-certificate
+	curve: string &optional; ##< curve, if EC-certificate
 };
 
 ## HTTP session statistics.

@@ -9,6 +9,7 @@
 #include "util.h"
 
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 #include <openssl/asn1.h>
 %}
 
@@ -26,6 +27,8 @@
 	void free_X509(void *);
 	X509* d2i_X509_binpac(X509** px, const uint8** in, int len);
 	string handshake_type_label(int type);
+	unsigned int key_length(EVP_PKEY*);
+	StringVal* key_curve(EVP_PKEY*);
 	%}
 
 %code{
@@ -67,6 +70,86 @@ string orig_label(bool is_orig)
 		default: return string(fmt("UNKNOWN (%d)", type));
 		}
 		}
+
+%}
+
+%code{
+// return key length of certificate for known key types in bits
+// return 0 if key is not known or cannot be parsed
+unsigned int key_length(EVP_PKEY *key) 
+	{
+	assert(key != NULL);
+	unsigned int length;
+
+	switch(key->type) {
+    	case EVP_PKEY_RSA:
+      		length = BN_num_bits(key->pkey.rsa->n);
+      		break;
+    	case EVP_PKEY_DSA:
+      		length = BN_num_bits(key->pkey.dsa->p);
+      		break;
+#ifndef OPENSSL_NO_EC
+		case EVP_PKEY_EC:
+		{
+		const EC_GROUP *group;       
+		BIGNUM* ec_order;
+		ec_order = BN_new();
+		if ( !ec_order ) 
+			// could not malloc bignum?
+			return 0;
+
+		if ( (group = EC_KEY_get0_group(key->pkey.ec)) == NULL) 
+			// unknown ex-group
+			return 0;
+
+		if (!EC_GROUP_get_order(group, ec_order, NULL)) 
+			// could not get ec-group-order
+			return 0;
+
+		length = BN_num_bits(ec_order);
+		BN_free(ec_order);
+		break;
+		}
+#endif
+	default:
+		return 0; // unknown public key type
+	}
+
+	return length;
+	}
+
+
+StringVal* key_curve(EVP_PKEY *key)
+	{
+	assert(key != NULL);
+
+#ifdef OPENSSL_NO_EC
+	// well, we do not have EC-Support...
+	return NULL;
+#else 
+	if ( key->type != EVP_PKEY_EC ) {
+		// no EC-key - no curve name
+		return NULL;
+	}
+
+	const EC_GROUP *group;
+	int nid;
+	if ( (group = EC_KEY_get0_group(key->pkey.ec)) == NULL) 
+		// I guess we could not parse this
+		return NULL;
+
+	nid = EC_GROUP_get_curve_name(group);
+	if ( nid == 0 ) 
+		// and an invalid nid...
+		return NULL;
+
+	const char * curve_name = OBJ_nid2sn(nid);
+	if ( curve_name == NULL ) 
+		return NULL;
+
+	return new StringVal(curve_name);
+#endif
+	}
 
 %}
 
@@ -240,6 +323,7 @@ refine connection SSL_Conn += {
 		return true;
 		%}
 
+
 	function proc_certificate(rec: SSLRecord, certificates : bytestring[]) : bool
 		%{
 		if ( certificates->size() == 0 )
@@ -251,6 +335,8 @@ refine connection SSL_Conn += {
 
 			for ( unsigned int i = 0; i < certificates->size(); ++i )
 				{
+				char buf[256]; // we need a buffer for some of the openssl functions
+				memset(buf, 0, 256);
 				const bytestring& cert = (*certificates)[i];
 				const uint8* data = cert.data();
 				X509* pTemp = d2i_X509_binpac(NULL, &data, cert.length());
@@ -281,6 +367,50 @@ refine connection SSL_Conn += {
 				pX509Cert->Assign(4, new Val(get_time_from_asn1(X509_get_notBefore(pTemp)), TYPE_TIME));
 				pX509Cert->Assign(5, new Val(get_time_from_asn1(X509_get_notAfter(pTemp)), TYPE_TIME));
 				StringVal* der_cert = new StringVal(cert.length(), (const char*) cert.data());
+
+				// we only read 255 bytes because byte 256 is always 0.
+				// if the string is longer than 255, that will be our null-termination,
+				// otherwhise i2t does null-terminate.
+				if ( ! i2t_ASN1_OBJECT(buf, 255, pTemp->cert_info->key->algor->algorithm) ) 
+					buf[0] = 0;
+				pX509Cert->Assign(6, new StringVal(buf));
+
+				if ( ! i2t_ASN1_OBJECT(buf, 255, pTemp->sig_alg->algorithm) ) 
+					buf[0] = 0;
+				pX509Cert->Assign(7, new StringVal(buf));
+
+				// Things we can do when we have the key...
+				EVP_PKEY *pkey = X509_extract_key(pTemp);
+				if ( pkey != NULL ) {
+
+					if ( pkey->type == EVP_PKEY_DSA ) 
+						{
+						pX509Cert->Assign(8, new StringVal("dsa"));
+						}
+					else if ( pkey->type == EVP_PKEY_RSA ) 
+						{
+						pX509Cert->Assign(8, new StringVal("rsa"));
+						char *exponent = BN_bn2dec(pkey->pkey.rsa->e);
+						if ( exponent != NULL ) 
+							{
+							pX509Cert->Assign(10, new StringVal(exponent));
+							OPENSSL_free(exponent);
+							exponent = NULL;
+							}
+						}
+#ifndef OPENSSL_NO_EC
+					else if ( pkey->type == EVP_PKEY_EC )
+						{
+						pX509Cert->Assign(8, new StringVal("dsa"));
+						pX509Cert->Assign(11, key_curve(pkey));
+						}
+#endif
+
+					unsigned int length = key_length(pkey);
+					if ( length > 0 ) 
+						pX509Cert->Assign(9, new Val(length, TYPE_COUNT));
+				}
+
 
 				BifEvent::generate_x509_certificate(bro_analyzer(), bro_analyzer()->Conn(),
 							${rec.is_orig},

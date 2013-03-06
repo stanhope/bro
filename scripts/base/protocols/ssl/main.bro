@@ -58,6 +58,7 @@ export {
 		analyzer_id:      count            &optional;
 	};
 
+
 	## The default root CA bundle.  By loading the
 	## mozilla-ca-list.bro script it will be set to Mozilla's root CA list.
 	const root_certs: table[string] of string = {} &redef;

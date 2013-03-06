@@ -572,6 +572,7 @@ void init_builtin_funcs()
 	matcher_stats = internal_type("matcher_stats")->AsRecordType();
 	var_sizes = internal_type("var_sizes")->AsTableType();
 	gap_info = internal_type("gap_info")->AsRecordType();
+	x509_verify_result = internal_type("X509_verify_result")->AsRecordType();	
 
 #include "bro.bif.func_init"
 #include "logging.bif.func_init"

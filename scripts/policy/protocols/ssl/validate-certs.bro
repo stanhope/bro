@@ -38,7 +38,7 @@ event ssl_established(c: connection) &priority=3
 	else
 		{
 		local result = x509_verify(c$ssl$cert, c$ssl$cert_chain, root_certs);
-		c$ssl$validation_status = x509_err2str(result);
+		c$ssl$validation_status = result$result_string;
 		}
 		
 	if ( c$ssl$validation_status != "ok" )

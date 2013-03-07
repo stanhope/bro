@@ -3938,7 +3938,7 @@ function x509_verify%(der_cert: string, cert_stack: string_vec, root_certs: tabl
 				goto x509_verify_chainerror;			
 				}
 
-			chainVector->Assign(i, new StringVal(bytes, (const char*) cert), 0);
+			chainVector->Assign(i, new StringVal(bytes, (const char*) cert));
 			OPENSSL_free(cert);
 			}
 		

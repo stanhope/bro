@@ -5145,7 +5145,7 @@ event ssl_session_ticket_handshake%(c: connection, ticket_lifetime_hint: count, 
 ##           format.
 ##
 ## .. bro:see:: ssl_alert ssl_client_hello ssl_established ssl_extension
-##    ssl_server_hello  x509_error x509_extension x509_verify
+##    ssl_server_hello  x509_error x509_extension x509_verify x509_certificate_done
 event x509_certificate%(c: connection, is_orig: bool, cert: X509, chain_idx: count, chain_len: count, der_cert: string%);
 
 ## Generated for X509 extensions seen in a certificate.
@@ -5160,8 +5160,8 @@ event x509_certificate%(c: connection, is_orig: bool, cert: X509, chain_idx: cou
 ## data: The raw data associated with the extension.
 ##
 ## .. bro:see:: ssl_alert ssl_client_hello ssl_established ssl_extension
-##    ssl_server_hello x509_certificate x509_error  x509_verify
-event x509_extension%(c: connection, is_orig: bool, data: string%);
+##    ssl_server_hello x509_certificate x509_error  x509_verify x509_certificate_done
+event x509_extension%(c: connection, is_orig: bool, extension: X509_extension%);
 
 ## Generated when errors occur during parsing an X509 certificate.
 ##
@@ -5176,8 +5176,23 @@ event x509_extension%(c: connection, is_orig: bool, data: string%);
 ##      maps error codes to a textual description.
 ##
 ## .. bro:see:: ssl_alert ssl_client_hello ssl_established ssl_extension
-##    ssl_server_hello x509_certificate  x509_extension x509_err2str x509_verify
+##    ssl_server_hello x509_certificate  x509_extension x509_err2str x509_verify x509_certificate_done
 event x509_error%(c: connection, is_orig: bool, err: count%);
+
+## Generated for X509 certificates when the whole certificate including all extensions
+## has been parsed.
+## See `Wikipedia <http://en.wikipedia.org/wiki/X.509>`__ for more information
+## about the X.509 format.
+##
+## c: The connection.
+##
+## is_orig: True if event is raised for originator side of the connection.
+##
+## cert: The parsed certificate.
+##
+## .. bro:see:: ssl_alert ssl_client_hello ssl_established ssl_extension
+##    ssl_server_hello x509_certificate  x509_extension x509_err2str x509_verify x509_certificate
+event x509_certificate_done%(c: connection, is_orig: bool, cert: X509, der_cert: string%);
 
 ## TODO.
 ##

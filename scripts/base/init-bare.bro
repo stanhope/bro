@@ -2366,6 +2366,18 @@ type X509: record {
 	curve: string &optional; ##< curve, if EC-certificate
 };
 
+## An X509 extension.
+##
+##
+## .. bro:see:: x509_extension
+type X509_extension: record {
+	name: string; ##< long name of extension. oid if name not known
+	short_name: string &optional; ##< short name of extension if known.
+	oid: string; ##< oid of extension
+	critical: bool; ##< true if extension is critical
+	value: string; ##< extension content parsed to string for known extensions. Raw data otherwise.
+};
+
 ## HTTP session statistics.
 ##
 ## .. bro:see:: http_stats

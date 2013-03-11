@@ -51,6 +51,7 @@ extern int tcp_excessive_data_without_further_acks;
 
 extern RecordType* x509_type;
 extern RecordType* x509_extension_type;
+extern RecordType* x509_basic_constraints_type;
 
 extern RecordType* socks_address;
 

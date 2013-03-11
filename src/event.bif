@@ -5157,11 +5157,26 @@ event x509_certificate%(c: connection, is_orig: bool, cert: X509, chain_idx: cou
 ##
 ## is_orig: True if event is raised for originator side of the connection.
 ##
-## data: The raw data associated with the extension.
+## extension: The parsed extension.
 ##
 ## .. bro:see:: ssl_alert ssl_client_hello ssl_established ssl_extension
 ##    ssl_server_hello x509_certificate x509_error  x509_verify x509_certificate_done
-event x509_extension%(c: connection, is_orig: bool, extension: X509_extension%);
+##    x509_extension_basic_constraint
+event x509_extension%(c: connection, is_orig: bool, cert: X509, extension: X509_extension_info%);
+
+## Generated for X509 basicConstraint extensions seen in a certificate.
+##
+## See `Wikipedia <http://en.wikipedia.org/wiki/X.509>`__ for more information
+## about the X.509 format.
+##
+## c: The connection.
+##
+## constraint: The processed basic constraints extension
+##
+## is_orig: True if event is raised for originator side of the connection.
+## .. bro:see:: ssl_alert ssl_client_hello ssl_established ssl_extension
+##    ssl_server_hello x509_certificate x509_error  x509_verify x509_certificate_done
+event x509_basic_constraints%(c: connection, is_orig: bool, cert: X509, constraint: X509_basic_constraints_info%);
 
 ## Generated when errors occur during parsing an X509 certificate.
 ##

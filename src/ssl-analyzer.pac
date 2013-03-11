@@ -470,8 +470,28 @@ refine connection SSL_Conn += {
 						pX509Ext->Assign(4, ext_val);
 
 						BifEvent::generate_x509_extension(bro_analyzer(),
-									bro_analyzer()->Conn(), ${rec.is_orig}, pX509Ext);
+									bro_analyzer()->Conn(), ${rec.is_orig}, pX509Cert->Ref(), pX509Ext);
+						
+
+
+						// for basicconstraints we throw another event
+						if ( OBJ_obj2nid(ext_asn) == NID_basic_constraints ) 
+							{
+							RecordVal* pBasicConstraint = new RecordVal(x509_basic_constraints_type);
+							BASIC_CONSTRAINTS *constr = (BASIC_CONSTRAINTS *) X509V3_EXT_d2i(ex);
+							pBasicConstraint->Assign(0, new Val(constr->ca ? 1 : 0, TYPE_BOOL));
+							if ( constr->pathlen ) {
+								pBasicConstraint->Assign(1, new Val((int32_t) ASN1_INTEGER_get(constr->pathlen), TYPE_COUNT));
+							}
+
+							BifEvent::generate_x509_basic_constraints(bro_analyzer(),
+										bro_analyzer()->Conn(), ${rec.is_orig}, pX509Cert->Ref(), pBasicConstraint);
+							}
+
 						}
+							
+
+
 					}
 				X509_free(pTemp);
 

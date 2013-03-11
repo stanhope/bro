@@ -2364,18 +2364,29 @@ type X509: record {
 	key_length: count &optional; ##< key-length in bits  
 	exponent: string &optional; ##< exponent, if RSA-certificate
 	curve: string &optional; ##< curve, if EC-certificate
+	ca: bool &optional; ##< indicates the CA value in the X509v3 BasicConstraints extension
+	path_len: count &optional; ##< indicates the path_length value in the X509v3 BasicConstraints extension
 };
 
 ## An X509 extension.
 ##
 ##
 ## .. bro:see:: x509_extension
-type X509_extension: record {
+type X509_extension_info: record {
 	name: string; ##< long name of extension. oid if name not known
 	short_name: string &optional; ##< short name of extension if known.
 	oid: string; ##< oid of extension
 	critical: bool; ##< true if extension is critical
 	value: string; ##< extension content parsed to string for known extensions. Raw data otherwise.
+};
+
+## X509 basic constraints extension.
+##
+##
+## .. bro:see:: x509_basic_constraints
+type X509_basic_constraints_info: record {
+	ca: bool; ##< CA flag set?
+	path_len: count &optional;
 };
 
 ## HTTP session statistics.

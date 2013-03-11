@@ -268,6 +268,16 @@ event x509_certificate(c: connection, is_orig: bool, cert: X509, chain_idx: coun
 		}
 	}
 
+event x509_basic_constraints(c: connection, is_orig: bool, cert: X509, constraint: X509_basic_constraints_info) &priority=5
+	{
+	cert$ca = constraint$ca;
+	if ( constraint?$path_len ) 
+		{
+		cert$path_len = constraint$path_len;
+		}
+	
+	}
+
 event ssl_extension(c: connection, is_orig: bool, code: count, val: string) &priority=5
 	{
 	set_session(c);

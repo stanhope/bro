@@ -645,6 +645,16 @@ type entropy_test_result: record {
 	serial_correlation: double;	##< Serial correlation coefficient.
 };
 
+## Result of an X509 certificate chain verification
+type X509_verify_result: record {
+	## OpenSSL result code
+	result:	count;
+	## Result as string
+	result_string: string;
+	## Der-encoded certificates that were used in chain construction. End-host certificate is first.
+	chain_certs: vector of string;
+};
+
 # Prototypes of Bro built-in functions.
 @load base/strings.bif
 @load base/bro.bif

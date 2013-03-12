@@ -455,11 +455,11 @@ refine connection SSL_Conn += {
 
 						BIO_flush(bio);
 						int length = BIO_pending(bio);
-						void *buffer = malloc(length);
+						char *buffer = new char(length);
 						BIO_read(bio, buffer, length);
-						StringVal* ext_val = new StringVal(length, (const char*) buffer);
+						StringVal* ext_val = new StringVal(length, buffer);
 						BIO_free_all(bio);
-						free(buffer);
+						delete(buffer);
 
 						RecordVal* pX509Ext = new RecordVal(x509_extension_type);						
 						pX509Ext->Assign(0, new StringVal(name));
@@ -479,13 +479,21 @@ refine connection SSL_Conn += {
 							{
 							RecordVal* pBasicConstraint = new RecordVal(x509_basic_constraints_type);
 							BASIC_CONSTRAINTS *constr = (BASIC_CONSTRAINTS *) X509V3_EXT_d2i(ex);
-							pBasicConstraint->Assign(0, new Val(constr->ca ? 1 : 0, TYPE_BOOL));
-							if ( constr->pathlen ) {
-								pBasicConstraint->Assign(1, new Val((int32_t) ASN1_INTEGER_get(constr->pathlen), TYPE_COUNT));
-							}
+							if ( !constr ) 
+								{
+								bro_analyzer()->Conn()->Weird("Certificate with invalid BasicConstraint");
+								}
+							else 	
+								{
+								pBasicConstraint->Assign(0, new Val(constr->ca ? 1 : 0, TYPE_BOOL));
+								if ( constr->pathlen ) {
+									pBasicConstraint->Assign(1, new Val((int32_t) ASN1_INTEGER_get(constr->pathlen), TYPE_COUNT));
+								}
 
-							BifEvent::generate_x509_basic_constraints(bro_analyzer(),
-										bro_analyzer()->Conn(), ${rec.is_orig}, pX509Cert->Ref(), pBasicConstraint);
+								BifEvent::generate_x509_basic_constraints(bro_analyzer(),
+											bro_analyzer()->Conn(), ${rec.is_orig}, pX509Cert->Ref(), pBasicConstraint);
+								}
+
 							}
 
 						}

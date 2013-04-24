@@ -3,8 +3,12 @@
 #include "Topk.h"
 #include "CompHash.h"
 #include "Reporter.h"
+#include "Serializer.h"
+
 
 namespace Topk {
+
+IMPLEMENT_SERIAL(TopkVal, SER_TOPK_VAL);
 
 static void topk_element_hash_delete_func(void* val)
 	{
@@ -40,6 +44,15 @@ TopkVal::TopkVal(uint64 arg_size) : OpaqueVal(new OpaqueType("topk"))
 	numElements = 0;
 	}
 
+TopkVal::TopkVal() : OpaqueVal(new OpaqueType("topk"))
+	{
+	elementDict = new PDict(Element);
+	elementDict->SetDeleteFunc(topk_element_hash_delete_func);
+	size = 0;
+	type = 0;
+	numElements = 0;
+	}
+
 TopkVal::~TopkVal()
 	{
 	elementDict->Clear();
@@ -56,6 +69,192 @@ TopkVal::~TopkVal()
 	if ( type ) 
 		Unref(type);
 	type = 0;
+	}
+
+void TopkVal::Merge(const TopkVal* value)
+	{
+
+	if ( type == 0 )
+		{
+		assert(numElements == 0);
+		type = value->type->Ref();
+		}
+	else
+		if ( !same_type(type, value->type) )
+			{
+			reporter->Error("Tried to merge top-k elements of differing types. Aborted");
+			return;
+			}
+
+	std::list<Bucket*>::const_iterator it = value->buckets.begin();
+	while ( it != value->buckets.end() )
+		{
+		Bucket* b = *it;
+		uint64_t currcount = b->count;
+		std::list<Element*>::const_iterator eit = b->elements.begin();
+		
+		while ( eit != b->elements.end() )
+			{
+			Element* e = *eit;
+			// lookup if we already know this one...
+			HashKey* key = GetHash(e->value);
+			Element* olde = (Element*) elementDict->Lookup(key);
+
+			if ( olde == 0 ) 
+				{
+				olde = new Element();
+				olde->epsilon=0;
+				olde->value = e->value->Ref();
+				// insert at bucket position 0
+				if ( buckets.size() > 0 ) 
+					{
+					assert (buckets.front()-> count > 0 );
+					}
+
+				Bucket* newbucket = new Bucket();
+				newbucket->count = 0;
+				newbucket->bucketPos = buckets.insert(buckets.begin(), newbucket);
+
+				olde->parent = newbucket;
+				newbucket->elements.insert(newbucket->elements.end(), olde);
+
+				elementDict->Insert(key, olde);
+				numElements++;
+
+				}
+
+			// now that we are sure that the old element is present - increment epsilon
+			olde->epsilon += e->epsilon;
+			// and increment position...
+			IncrementCounter(olde, currcount);
+			delete key;
+
+			eit++;
+			}
+
+		it++;
+		}
+
+	// now we have added everything. And our top-k table could be too big.
+	// prune everything...
+	
+	assert(size > 0);
+	while ( numElements > size ) 
+		{
+		assert(buckets.size() > 0 );
+		Bucket* b = buckets.front();
+		assert(b->elements.size() > 0);
+
+		Element* e = b->elements.front();
+		HashKey* key = GetHash(e->value);
+		elementDict->RemoveEntry(key);
+		delete e;
+
+		b->elements.pop_front();
+		
+		if ( b->elements.size() == 0 ) 
+			{
+			delete b;
+			buckets.pop_front();
+			}
+
+		numElements--;
+		}
+
+	}
+
+bool TopkVal::DoSerialize(SerialInfo* info) const
+	{
+	DO_SERIALIZE(SER_TOPK_VAL, OpaqueVal);
+
+	bool v = true;
+
+	v &= SERIALIZE(size);
+	v &= SERIALIZE(numElements);
+	bool type_present = (type != 0);
+	v &= SERIALIZE(type_present);
+	if ( type_present )
+		v &= type->Serialize(info);
+	else 
+		assert(numElements == 0);
+
+	int i = 0;
+	std::list<Bucket*>::const_iterator it = buckets.begin();
+	while ( it != buckets.end() ) 
+		{
+		Bucket* b = *it;
+		uint32_t elements_count = b->elements.size();
+		v &= SERIALIZE(elements_count);
+		v &= SERIALIZE(b->count);
+		std::list<Element*>::const_iterator eit = b->elements.begin();
+		while ( eit != b->elements.end() ) 
+			{
+			Element* element = *eit;
+			v &= SERIALIZE(element->epsilon);
+			v &= element->value->Serialize(info);
+
+			eit++;
+			i++;
+			}
+
+		it++;
+		}
+
+	assert(i == numElements);
+
+	return v;
+	}
+
+bool TopkVal::DoUnserialize(UnserialInfo* info)
+	{
+	DO_UNSERIALIZE(OpaqueVal);
+
+	bool v = true;
+
+	v &= UNSERIALIZE(&size);
+	v &= UNSERIALIZE(&numElements);
+	bool type_present = false;
+	v &= UNSERIALIZE(&type_present);
+	if ( type_present ) 
+		{
+		type = BroType::Unserialize(info);
+		assert(type);
+		}
+	else
+		assert(numElements == 0);
+
+	int i = 0;
+	while ( i < numElements ) 
+		{
+		Bucket* b = new Bucket();
+		uint32_t elements_count;
+		v &= UNSERIALIZE(&elements_count);
+		v &= UNSERIALIZE(&b->count);
+		b->bucketPos = buckets.insert(buckets.end(), b);
+
+		for ( int j = 0; j < elements_count; j++ ) 
+			{
+			Element* e = new Element();
+			v &= UNSERIALIZE(&e->epsilon);
+			e->value = Val::Unserialize(info, type);
+			e->parent = b;
+
+			b->elements.insert(b->elements.end(), e);
+
+			HashKey* key = GetHash(e->value);
+			assert (  elementDict->Lookup(key) == 0 );
+
+			elementDict->Insert(key, e);
+			delete key;
+
+		
+			i++;
+			}
+		}
+
+	assert(i == numElements);
+
+	return v;
 	}
 
 
@@ -210,7 +409,8 @@ void TopkVal::Encountered(Val* encountered)
 	
 	}
 
-void TopkVal::IncrementCounter(Element* e) 
+// increment by count
+void TopkVal::IncrementCounter(Element* e, unsigned int count) 
 	{
 	Bucket* currBucket = e->parent;
 	uint64 currcount = currBucket->count;
@@ -222,11 +422,11 @@ void TopkVal::IncrementCounter(Element* e)
 
 	bucketIter++;
 
-	if ( bucketIter != buckets.end() ) 
-		{
-		if ( (*bucketIter)->count == currcount+1 )
-			nextBucket = *bucketIter;
-		}
+	while ( bucketIter != buckets.end() && (*bucketIter)->count < currcount+count ) 
+		bucketIter++;
+
+	if ( bucketIter != buckets.end() && (*bucketIter)->count == currcount+count )
+		nextBucket = *bucketIter;
 
 	if ( nextBucket == 0 ) 
 		{
@@ -234,7 +434,7 @@ void TopkVal::IncrementCounter(Element* e)
 		// create it...
 
 		Bucket* b = new Bucket();
-		b->count = currcount+1;
+		b->count = currcount+count;
 
 		std::list<Bucket*>::iterator nextBucketPos = buckets.insert(bucketIter, b);
 		b->bucketPos = nextBucketPos; // and give it the iterator we know now.

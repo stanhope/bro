@@ -40,9 +40,14 @@ public:
 	VectorVal* getTopK(int k) const; // returns vector
 	uint64_t getCount(Val* value) const;
 	uint64_t getEpsilon(Val* value) const;
+	uint64_t getSize() const { return size; }
+	void Merge(const TopkVal* value);
+
+protected:
+	TopkVal(); // for deserialize
 
 private:
-	void IncrementCounter(Element* e);
+	void IncrementCounter(Element* e, unsigned int count = 1);
 	HashKey* GetHash(Val*) const; // this probably should go somewhere else.
 		
 	BroType* type;
@@ -50,6 +55,8 @@ private:
 	PDict(Element)* elementDict;
 	uint64 size; // how many elements are we tracking?
 	uint64 numElements; // how many elements do we have at the moment
+
+	DECLARE_SERIAL(TopkVal); 
 };
 
 };

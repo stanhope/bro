@@ -1,6 +1,78 @@
 #include "OpaqueVal.h"
 #include "Reporter.h"
 #include "Serializer.h"
+#include "HyperLogLog.h"
+
+
+CardinalityVal::CardinalityVal() : OpaqueVal(new OpaqueType("cardinality"))
+	{
+	valid = false;
+	}
+
+CardinalityVal::~CardinalityVal() 
+	{
+	if ( valid  && c != 0 ) 
+		delete c;
+	c = 0;
+	valid = false;
+	}
+IMPLEMENT_SERIAL(CardinalityVal, SER_CARDINALITY_VAL);
+
+bool CardinalityVal::DoSerialize(SerialInfo* info) const
+	{
+	DO_SERIALIZE(SER_CARDINALITY_VAL, OpaqueVal);
+
+	bool serialvalid = true;
+	serialvalid &= SERIALIZE(&valid);
+
+	if ( ! IsValid() )
+		return serialvalid;
+
+	assert(c);
+
+	serialvalid &= SERIALIZE(c->m);
+	serialvalid &= SERIALIZE(c->V);
+	serialvalid &= SERIALIZE(c->alpha_m);
+	for ( int i = 0; i < c->m; i++ ) 
+		serialvalid &= SERIALIZE( c->buckets[i] );
+
+	return serialvalid;
+	}
+
+bool CardinalityVal::DoUnserialize(UnserialInfo* info)
+	{
+	DO_UNSERIALIZE(OpaqueVal);
+
+	bool serialvalid = UNSERIALIZE(&valid);
+	
+	if ( ! IsValid() )
+		return serialvalid;
+
+	uint64_t m;
+
+	serialvalid &= UNSERIALIZE(&m);
+	c = new CardinalityCounter(m);
+	serialvalid &= UNSERIALIZE(&c->V);
+	serialvalid &= UNSERIALIZE(&c->alpha_m);
+
+	uint8_t* buckets = c->buckets;
+	for ( int i = 0; i < m; i++ ) 
+		{
+		uint8_t* currbucket = buckets + i;
+		serialvalid &= UNSERIALIZE( currbucket );
+		}
+	return valid;
+	}  
+
+bool CardinalityVal::Init(CardinalityCounter* arg_c)
+	{
+	if ( valid )
+		return false;
+
+	valid = true;
+	c = arg_c;
+	return valid;
+	}
 
 bool HashVal::IsValid() const
 	{

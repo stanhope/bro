@@ -338,6 +338,7 @@ set(bro_SRCS
     HTTP.cc
     HTTP-binpac.cc
     Hash.cc
+    HyperLogLog.cc
     ICMP.cc
     ID.cc
     Ident.cc

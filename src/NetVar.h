@@ -249,6 +249,7 @@ extern OpaqueType* sha1_type;
 extern OpaqueType* sha256_type;
 extern OpaqueType* entropy_type;
 extern OpaqueType* cardinality_type;
+extern OpaqueType* topk_type;
 
 // Initializes globals that don't pertain to network/event analysis.
 extern void init_general_global_var();

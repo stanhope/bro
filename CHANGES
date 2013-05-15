@@ -1,4 +1,130 @@
 
+2.1-502 | 2013-05-10 19:29:37 -0700
+
+  * Allow default function/hook/event parameters. Addresses #972. (Jon
+    Siwek)
+
+  * Change the endianness parameter of bytestring_to_count() BIF to
+    default to false (big endian). (Jon Siwek)
+
+2.1-500 | 2013-05-10 19:22:24 -0700
+
+  * Fix to prevent merge-hook of SumStat's unique plugin from damaging
+    source data. (Bernhard Amann)
+
+2.1-498 | 2013-05-03 17:44:08 -0700
+
+  * Table lookups return copy of non-const &default vals. This
+    prevents unintentional modifications to the &default value itself.
+    Addresses #981.  (Jon Siwek)
+
+2.1-496 | 2013-05-03 15:54:47 -0700
+
+  * Fix memory leak and unnecessary allocations in OpaqueVal.
+    Addresses #986. (Matthias Vallentin)
+
+2.1-492 | 2013-05-02 12:46:26 -0700
+
+  * Work-around for sumstats framework not propagating updates after
+    intermediate check in cluster environments. (Bernhard Amann)
+
+  * Always apply tcp_connection_attempt. Before this change it was
+    only applied when a connection_attempt() event handler was
+    defined. (Robin Sommer)
+
+  * Fixing coverage.bare-mode-errors test. (Robin Sommer)
+
+2.1-487 | 2013-05-01 18:03:22 -0700
+
+  * Always apply tcp_connection_attempt timer, even if no
+    connection_attempt() event handler is defined. (Robin Sommer)
+
+2.1-486 | 2013-05-01 15:28:45 -0700
+
+  * New framework for computing summary statistics in
+    base/framework/sumstats. This replaces the metrics frameworks, and
+    comes with a number of applications build on top, see NEWS. More
+    documentation to follow. (Seth Hall)
+
+2.1-397 | 2013-04-29 21:19:00 -0700
+
+  * Fixing memory leaks in CompHash implementation. Addresses #987.
+    (Robin Sommer)
+
+2.1-394 | 2013-04-27 15:02:31 -0700
+
+  * Fixed a bug in the vulnerable software script and added a test.
+    (Seth Hall)
+
+  * Fix schedule statements used outside event handlers. Addresses
+    #974. (Jon Siwek)
+
+  * Fix record coercion for default inner record fields. Addresses
+    #973. (Jon Siwek)
+
+  * Add bytestring_to_count function to bro.bif. Addresses #968. (Yun
+    Zheng Hu)
+
+2.1-386 | 2013-03-22 12:41:50 -0700
+
+  * Added reverse() function to strings.bif. (Yun Zheng Hu)
+    
+2.1-384 | 2013-03-22 12:10:14 -0700
+
+  * Fix record constructors in table initializer indices.  Addresses
+    #660. (Jon Siwek)
+
+2.1-382 | 2013-03-22 12:01:34 -0700
+
+  * Add support for 802.1ah (Q-in-Q). Addresses #641. (Seth Hall)
+    
+2.1-380 | 2013-03-18 12:18:10 -0700
+
+  * Fix gcc compile warnings in base64 encoder and benchmark reader.
+    (Bernhard Amann)
+    
+2.1-377 | 2013-03-17 17:36:09 -0700
+
+  * Fixing potential leak in DNS error case. (Vlad Grigorescu)
+    
+2.1-375 | 2013-03-17 13:14:26 -0700
+
+  * Add base64 encoding functionality, including new BiFs
+	encode_base64() and encode_base64_custom(). (Bernhard Amann)
+
+  * Replace call to external "openssl" in extract-certs-pem.bro with
+	that encode_base64(). (Bernhard Amann)
+
+  * Adding a test for extract-certs-pem.pem. (Robin Sommer)
+
+  * Renaming Base64Decoder to Base64Converter. (Robin Sommer)
+    
+2.1-366 | 2013-03-17 12:35:59 -0700
+
+  * Correctly handle DNS lookups for software version ranges. (Seth
+    Hall)
+
+  * Improvements to vulnerable software detection. (Seth Hall)
+    
+     - Add a DNS based updating method.  This needs to be tested
+       still.
+
+     - Vulnerable version ranges are used now instead of only single
+       versions.  This can deal with software with multiple stable
+       major versions.
+
+  * Update software version parsing and comparison to account for a
+    third numeric subversion. Also, $addl is now compared numerically
+    if the value is actually numeric. (Seth Hall)
+
+2.1-361 | 2013-03-13 07:18:22 -0700
+
+  * Add check for truncated link frames. Addresses #962. (Jacob
+    Baines)
+
+  * Fix large memory allocation in IP fragment reassembly. Addresses
+    #961. (Jacob Baines)
+
 2.1-357 | 2013-03-08 09:18:35 -0800
 
   * Fix race-condition in table-event test. (Bernhard Amann)

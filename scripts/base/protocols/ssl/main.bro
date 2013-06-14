@@ -95,11 +95,6 @@ redef record Info += {
 		delay_tokens: set[string] &optional;
 };
 
-event bro_init() &priority=5
-	{
-	Log::create_stream(SSL::LOG, [$columns=Info, $ev=log_ssl]);
-	}
-
 redef capture_filters += {
 	["ssl"] = "tcp port 443",
 	["nntps"] = "tcp port 563",
@@ -118,16 +113,9 @@ redef capture_filters += {
 const ports = {
 	443/tcp, 563/tcp, 585/tcp, 614/tcp, 636/tcp,
 	989/tcp, 990/tcp, 992/tcp, 993/tcp, 995/tcp, 5223/tcp
-};
+} &redef;
 
-redef dpd_config += {
-	[[ANALYZER_SSL]] = [$ports = ports]
-};
-
-redef likely_server_ports += {
-	443/tcp, 563/tcp, 585/tcp, 614/tcp, 636/tcp,
-	989/tcp, 990/tcp, 992/tcp, 993/tcp, 995/tcp, 5223/tcp
-};
+redef likely_server_ports += { ports };
 
 # A queue that buffers log records.
 global log_delay_queue: table[count] of Info;
@@ -135,6 +123,12 @@ global log_delay_queue: table[count] of Info;
 global log_delay_queue_head = 0;
 # The bottom queue index that points to the next record to be flushed.
 global log_delay_queue_tail = 0;
+
+event bro_init() &priority=5
+	{
+	Log::create_stream(SSL::LOG, [$columns=Info, $ev=log_ssl]);
+	Analyzer::register_for_ports(Analyzer::ANALYZER_SSL, ports);
+	}
 
 function set_session(c: connection)
 	{
@@ -299,14 +293,14 @@ event ssl_established(c: connection) &priority=-5
 	finish(c);
 	}
 
-event protocol_confirmation(c: connection, atype: count, aid: count) &priority=5
+event protocol_confirmation(c: connection, atype: Analyzer::Tag, aid: count) &priority=5
 	{
 	# Check by checking for existence of c$ssl record.
-	if ( c?$ssl && analyzer_name(atype) == "SSL" )
+	if ( c?$ssl && atype == Analyzer::ANALYZER_SSL )
 		c$ssl$analyzer_id = aid;
 	}
 
-event protocol_violation(c: connection, atype: count, aid: count,
+event protocol_violation(c: connection, atype: Analyzer::Tag, aid: count,
                          reason: string) &priority=5
 	{
 	if ( c?$ssl )

@@ -38,7 +38,7 @@
 #include "Func.h"
 #include "Frame.h"
 #include "Var.h"
-#include "Login.h"
+#include "analyzer/protocol/login/Login.h"
 #include "Sessions.h"
 #include "RE.h"
 #include "Serializer.h"
@@ -553,28 +553,29 @@ void builtin_error(const char* msg, BroObj* arg)
 #include "input.bif.func_h"
 #include "reporter.bif.func_h"
 #include "strings.bif.func_h"
+#include "file_analysis.bif.func_h"
 
 #include "bro.bif.func_def"
 #include "logging.bif.func_def"
 #include "input.bif.func_def"
 #include "reporter.bif.func_def"
 #include "strings.bif.func_def"
+#include "file_analysis.bif.func_def"
 
 void init_builtin_funcs()
 	{
-	ftp_port = internal_type("ftp_port")->AsRecordType();
 	bro_resources = internal_type("bro_resources")->AsRecordType();
 	net_stats = internal_type("NetStats")->AsRecordType();
 	matcher_stats = internal_type("matcher_stats")->AsRecordType();
 	var_sizes = internal_type("var_sizes")->AsTableType();
 	gap_info = internal_type("gap_info")->AsRecordType();
-	x509_verify_result = internal_type("X509_verify_result")->AsRecordType();	
 
 #include "bro.bif.func_init"
 #include "logging.bif.func_init"
 #include "input.bif.func_init"
 #include "reporter.bif.func_init"
 #include "strings.bif.func_init"
+#include "file_analysis.bif.func_init"
 
 	did_builtin_init = true;
 	}

@@ -31,7 +31,6 @@
 @load integration/barnyard2/types.bro
 @load integration/collective-intel/__load__.bro
 @load integration/collective-intel/main.bro
-@load misc/analysis-groups.bro
 @load misc/app-metrics.bro
 @load misc/capture-loss.bro
 @load misc/detect-traceroute/__load__.bro
@@ -78,3 +77,5 @@
 @load tuning/defaults/warnings.bro
 @load tuning/logs-to-elasticsearch.bro
 @load tuning/track-all-assets.bro
+
+redef LogElasticSearch::server_host = "";

@@ -45,12 +45,6 @@ macro(REST_TARGET srcDir broInput)
 
     set(sumTextSrc ${absSrcPath})
     set(ogSourceFile ${absSrcPath})
-    if (${extension} STREQUAL ".bif.bro")
-        set(ogSourceFile ${BIF_SRC_DIR}/${basename})
-        # the summary text is taken at configure time, but .bif.bro files
-        # may not have been generated yet, so read .bif file instead
-        set(sumTextSrc ${ogSourceFile})
-    endif ()
 
     if (NOT relDstDir)
         set(docName "${basename}")
@@ -70,7 +64,7 @@ macro(REST_TARGET srcDir broInput)
 
     if (NOT "${ARGN}" STREQUAL "")
         set(group ${ARGN})
-    elseif (${extension} STREQUAL ".bif.bro")
+    elseif (${broInput} MATCHES "\\.bif\\.bro$")
         set(group bifs)
     elseif (relDstDir)
         set(group ${relDstDir}/index)
@@ -107,7 +101,7 @@ macro(REST_TARGET srcDir broInput)
         COMMAND "${CMAKE_COMMAND}"
         ARGS -E remove_directory .state
         # generate the reST documentation using bro
-        COMMAND BROPATH=${BROPATH}:${srcDir} ${CMAKE_BINARY_DIR}/src/bro
+        COMMAND BROPATH=${BROPATH}:${srcDir} BROMAGIC=${CMAKE_SOURCE_DIR}/magic ${CMAKE_BINARY_DIR}/src/bro
         ARGS -b -Z ${broInput} || (rm -rf .state *.log *.rst && exit 1)
         # move generated doc into a new directory tree that
         # defines the final structure of documents

@@ -577,8 +577,9 @@ void NetSessions::DoNextPacket(double t, const struct pcap_pkthdr* hdr,
 
 		if ( result < 0 )
 			Weird("truncated_inner_IP", ip_hdr, encapsulation);
-
-		else if ( result > 0 )
+		else if ( result == 1 )
+			Weird(fmt("bad_inner_IP_protocol_version_%d", next_proto), ip_hdr, encapsulation);
+		else if ( result > 1 )
 			Weird("inner_IP_payload_length_mismatch", ip_hdr, encapsulation);
 
 		if ( result != 0 )
@@ -624,6 +625,112 @@ void NetSessions::DoNextPacket(double t, const struct pcap_pkthdr* hdr,
 		     encapsulation->LastType() == BifEnum::Tunnel::TEREDO ) )
 			Weird("ipv6_no_next", hdr, pkt);
 
+		Remove(f);
+		return;
+		}
+
+	case IPPROTO_GRE:
+	  	{
+		// GRE has some optional fields, depending on some flags. Let's read those flags.
+	  	bool checksum_present = (*data & 8);
+		bool routing_present = (*data & 4);
+		bool key_present = (*data & 2);
+		bool seq_present = (*data & 1);
+		int gre_protocol = (*(data + 2) << 8) + *(data + 3);
+		
+		// Minimum GRE header is 4 bytes.
+		int gre_len = 4;
+
+		// Now we check the flags, and increase the size of the header if those optional
+		// fields will be present.
+		if ( checksum_present || routing_present )
+			gre_len += 4;
+		if ( key_present )
+			gre_len += 4;
+		if ( seq_present )
+			gre_len += 4;
+		
+		// GRE header parsed. Some protocols have some other headers that we need to skip.
+		switch ( gre_protocol ) {
+		// IP over GRE
+		case 0x0800:
+			// The IP header immediately follows, so we're good.
+			break;
+		//
+		// Start Aruba access point <-> controller communication.
+		case 0x8200:
+		case 0x8300:
+			// We have a 3-address 802.11 QoS header (26 bytes)
+			// and then a LLC SNAP header (8 bytes)
+			gre_len += 34;
+			break;
+		case 0x8210:
+		case 0x8310:
+			// Encrypted traffic. Can't do anything with it.
+			Remove(f);
+			return;
+		case 0x9000:
+			// Can't tell what this is. A 64 byte payload follows the GRE header,
+		  	// but it doesn't seem to be IP?
+			Remove(f);
+			return;
+		// End Aruba
+		//
+		// TODO: What other GRE protocols do we see?
+		default:
+			Weird(fmt("unknown_gre_protocol_%d", gre_protocol), hdr, pkt, encapsulation);
+			Remove(f);
+			return;
+		}
+		
+		// Check for a valid inner packet first.
+		IP_Hdr* inner = 0;
+		
+		// Here we're assuming that we'll see an IP header, and thus bit-shift by 4 to get
+		// the IP version. This is a relatively safe bet, since ParseIPPacket won't let us
+		// go any further if this somehow isn't an IP header.
+		int next_proto = *(data + gre_len) >> 4;
+
+		int result = ParseIPPacket(caplen - gre_len, data + gre_len, next_proto, inner);
+		
+		if ( result < 0 )
+			Weird("truncated_gre_inner_IP", ip_hdr, encapsulation);
+		else if ( result == 1 )
+			Weird(fmt("bad_gre_inner_IP_protocol_version_%d", next_proto), ip_hdr, encapsulation);
+		else if ( result > 1 )
+			Weird("gre_inner_IP_payload_length_mismatch", ip_hdr, encapsulation);
+
+
+		if ( result != 0 )
+			{
+			delete inner;
+			Remove(f);
+			return;
+			}
+		
+		// Look up to see if we've already seen this GRE tunnel, identified
+		// by the pair of IP addresses, so that we can always associate the
+		// same UID with it.
+		IPPair tunnel_idx;
+		if ( ip_hdr->SrcAddr() < ip_hdr->DstAddr() )
+			tunnel_idx = IPPair(ip_hdr->SrcAddr(), ip_hdr->DstAddr());
+		else
+			tunnel_idx = IPPair(ip_hdr->DstAddr(), ip_hdr->SrcAddr());
+
+		IPTunnelMap::iterator it = ip_tunnels.find(tunnel_idx);
+
+		if ( it == ip_tunnels.end() )
+			{
+			EncapsulatingConn ec(ip_hdr->SrcAddr(), ip_hdr->DstAddr(), BifEnum::Tunnel::GRE);
+			ip_tunnels[tunnel_idx] = TunnelActivity(ec, network_time);
+			timer_mgr->Add(new IPTunnelTimer(network_time, tunnel_idx));
+			}
+		else
+			it->second.second = network_time;
+
+		DoNextInnerPacket(t, hdr, inner, encapsulation,
+				  ip_tunnels[tunnel_idx].first);
+		
 		Remove(f);
 		return;
 		}
@@ -781,10 +888,13 @@ int NetSessions::ParseIPPacket(int caplen, const u_char* const pkt, int proto,
 		}
 
 	else
-		reporter->InternalError("Bad IP protocol version in DoNextInnerPacket");
+		{
+		// Unsupported protocol
+		return 1;
+		}
 
 	if ( (uint32)caplen != inner->TotalLen() )
-		return (uint32)caplen < inner->TotalLen() ? -1 : 1;
+		return (uint32)caplen < inner->TotalLen() ? -1 : 2;
 
 	return 0;
 	}

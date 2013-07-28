@@ -186,6 +186,7 @@ enum Type %{
 	TEREDO,
 	SOCKS,
 	GTPv1,
+	GRE,
 %}
 
 type EncapsulatingConn: record;

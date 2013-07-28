@@ -45,6 +45,21 @@ public:
 		}
 
 	/**
+	 * Construct an IP tunnel "connection" with its own UID.
+	 * Same as above, but with an extra argument for the tunnel type.
+	 *
+	 * @param s The tunnel source address, likely taken from an IP header.
+	 * @param d The tunnel destination address, likely taken from an IP header.
+	 * @param t The tunnel type (e.g. type(BifEnum::Tunnel::IP))
+	 */
+ 	EncapsulatingConn(const IPAddr& s, const IPAddr& d, BifEnum::Tunnel::Type t)
+		: src_addr(s), dst_addr(d), src_port(0), dst_port(0),
+    		  proto(TRANSPORT_UNKNOWN), type(t)
+		{
+		uid = calculate_unique_id();
+		}
+
+	/**
 	 * Construct a tunnel connection using information from an already existing
 	 * transport-layer-aware connection object.
 	 *
@@ -84,7 +99,7 @@ public:
 		if ( ec1.type != ec2.type )
 			return false;
 
-		if ( ec1.type == BifEnum::Tunnel::IP )
+		if ( ec1.type == BifEnum::Tunnel::IP || ec1.type == BifEnum::Tunnel::GRE )
 			// Reversing endpoints is still same tunnel.
 			return ec1.uid == ec2.uid && ec1.proto == ec2.proto &&
 			  ((ec1.src_addr == ec2.src_addr && ec1.dst_addr == ec2.dst_addr) ||

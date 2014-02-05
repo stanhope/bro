@@ -2352,6 +2352,7 @@ type dns_edns_additional: record {
 	z_field: count;	##< TODO.
 	TTL: interval;	##< Time-to-live.
 	is_query: count;	##< TODO.
+	DO: bool;
 };
 
 ## An additional DNS TSIG record.

@@ -959,7 +959,7 @@ Val* DNS_MsgInfo::BuildEDNS_Val()
 
 	unsigned int ercode = (ttl >> 24) & 0xff;
 	unsigned int version = (ttl >> 16) & 0xff;
-	// unsigned int DO = ttl & 0x8000;	// "DNSSEC OK" - RFC 3225
+	unsigned int DO = ttl & 0x8000;	// "DNSSEC OK" - RFC 3225
 	unsigned int z = ttl & 0xffff;
 
 	unsigned int return_error = (ercode << 8) | rcode;
@@ -969,6 +969,7 @@ Val* DNS_MsgInfo::BuildEDNS_Val()
 	r->Assign(6, new Val(z, TYPE_COUNT));
 	r->Assign(7, new IntervalVal(double(ttl), Seconds));
 	r->Assign(8, new Val(is_query, TYPE_COUNT));
+	r->Assign(8, new Val(DO, TYPE_BOOL));
 
 	return r;
 	}

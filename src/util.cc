@@ -1247,6 +1247,54 @@ FILE* rotate_file(const char* name, RecordVal* rotate_info)
 	return newf;
 	}
 
+FILE* rotate_file_to_name(const char* name, const char* to_name, RecordVal* rotate_info)
+	{
+	// Build file names.
+	const int buflen = strlen(name) + 128;
+	char tmpname[buflen], newname[buflen+4];
+	safe_snprintf(newname, buflen, "%s", to_name);
+	newname[buflen-1] = '\0';
+	strcpy(tmpname, newname);
+	strcat(tmpname, ".tmp");
+
+	// First open the new file using a temporary name.
+	FILE* newf = fopen(tmpname, "w");
+	if ( ! newf )
+		{
+		reporter->Error("rotate_file: can't open %s: %s", tmpname, strerror(errno));
+		return 0;
+		}
+
+	// Then move old file to and make sure it really gets created.
+	struct stat dummy;
+	if ( link(name, newname) < 0 || stat(newname, &dummy) < 0 )
+		{
+		reporter->Error("rotate_file: can't move %s to %s: %s", name, newname, strerror(errno));
+		fclose(newf);
+		unlink(newname);
+		unlink(tmpname);
+		return 0;
+		}
+
+	// Close current file, and move the tmp to its place.
+	if ( unlink(name) < 0 || link(tmpname, name) < 0 || unlink(tmpname) < 0 )
+		{
+		reporter->Error("rotate_file: can't move %s to %s: %s", tmpname, name, strerror(errno));
+		exit(1);	// hard to fix, but shouldn't happen anyway...
+		}
+
+	// Init rotate_info.
+	if ( rotate_info )
+		{
+		rotate_info->Assign(0, new StringVal(name));
+		rotate_info->Assign(1, new StringVal(newname));
+		rotate_info->Assign(2, new Val(network_time, TYPE_TIME));
+		rotate_info->Assign(3, new Val(network_time, TYPE_TIME));
+		}
+
+	return newf;
+	}
+
 const char* log_file_name(const char* tag)
 	{
 	const char* env = getenv("BRO_LOG_SUFFIX");

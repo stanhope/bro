@@ -315,6 +315,11 @@ FILE* open_package(std::string& path, const std::string& mode = "r");
 class RecordVal;
 extern FILE* rotate_file(const char* name, RecordVal* rotate_info);
 
+// Renames the given file to a specified name, and opens a new file with
+// the original name. Returns new file or NULL on error. Inits rotate_info if
+// given (open time is set network time).
+extern FILE* rotate_file_to_name(const char* name, const char* to_name, RecordVal* rotate_info);
+
 // This mimics the script-level function with the same name.
 const char* log_file_name(const char* tag);
 

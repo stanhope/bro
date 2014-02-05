@@ -11,6 +11,7 @@ module Log;
 type Filter: record;
 type Stream: record;
 type RotationInfo: record;
+type ManualTimerInfo: record;
 
 function Log::__create_stream%(id: Log::ID, stream: Log::Stream%) : bool
 	%{
@@ -51,6 +52,18 @@ function Log::__remove_filter%(id: Log::ID, name: string%) : bool
 function Log::__write%(id: Log::ID, columns: any%) : bool
 	%{
 	bool result = log_mgr->Write(id->AsEnumVal(), columns->AsRecordVal());
+	return new Val(result, TYPE_BOOL);
+	%}
+
+function Log::__write_at%(t: double, id: Log::ID, columns: any%) : bool
+	%{
+	bool result = log_mgr->WriteAt(t, id->AsEnumVal(), columns->AsRecordVal());
+	return new Val(result, TYPE_BOOL);
+	%}
+
+function Log::__install_manual_timer%(t: double, delta: double%) : bool
+	%{
+	bool result = log_mgr->InstallManualTimer(t, delta);
 	return new Val(result, TYPE_BOOL);
 	%}
 

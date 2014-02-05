@@ -75,6 +75,18 @@ export {
 		terminating: bool;	##< True if rotation occured due to Bro shutting down.
 	};
 
+	## @componentry - Feb 2014
+	## Used by some custom logging rotation policies. But not limited to logging. 
+	## Could be moved to bro.bif for general purpose usage.
+	type ManualTimerInfo: record {
+	     start: double;
+	     t: double;
+	     timer_interval: double;
+	     is_expire: bool;
+	};
+	global default_manual_timer_callback: function(info:ManualTimerInfo) : bool &redef;
+	const manual_rotation_interval = 0secs &redef;
+
 	## Default rotation interval. Zero disables rotation.
 	##
 	## Note that this is overridden by the BroControl LogRotationInterval
@@ -293,6 +305,8 @@ export {
 	##
 	## .. bro:see: Log::enable_stream Log::disable_stream
 	global write: function(id: ID, columns: any) : bool;
+	global write_at: function(t:double, id: ID, columns: any) : bool;
+	global install_manual_timer: function(t:double, delta:double):bool;
 
 	## Sets the buffering status for all the writers of a given logging stream.
 	## A given writer implementation may or may not support buffering and if
@@ -388,6 +402,17 @@ function __default_rotation_postprocessor(info: RotationInfo) : bool
 	else
 		# Return T by default so that postprocessor-less writers don't shutdown.
 		return T;
+	}
+
+function default_manual_timer_callback(info: ManualTimerInfo) : bool
+{
+	print fmt("default_timer_callback start=%f t=%f interval=%f is_expire=%d net=%f", info$start, info$t, info$timer_interval, info$is_expire, network_time());
+	return T;
+}
+
+function install_manual_timer(t:double, delta:double) : bool
+	{
+	return __install_manual_timer(t, delta);
 	}
 
 function default_path_func(id: ID, path: string, rec: any) : string
@@ -503,6 +528,11 @@ function get_filter(id: ID, name: string) : Filter
 function write(id: ID, columns: any) : bool
 	{
 	return __write(id, columns);
+	}
+
+function write_at(t:double, id: ID, columns: any) : bool
+	{
+	return __write_at(t,id, columns);
 	}
 
 function set_buf(id: ID, buffered: bool): bool

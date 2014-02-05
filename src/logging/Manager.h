@@ -14,6 +14,7 @@
 class SerializationFormat;
 class RemoteSerializer;
 class RotationTimer;
+class ManualTimer;
 
 namespace logging {
 
@@ -125,6 +126,7 @@ public:
 	 * logging.bif, which just forwards here.
 	 */
 	bool Write(EnumVal* id, RecordVal* columns);
+	bool WriteAt(double t, EnumVal* id, RecordVal* columns);
 
 	/**
 	 * Sets log streams buffering state. This adjusts all associated
@@ -159,12 +161,15 @@ public:
 	 */
 	static list<string> SupportedFormats();
 
+	bool InstallManualTimer(double t, double delta);
+
 protected:
 	friend class WriterFrontend;
 	friend class RotationFinishedMessage;
 	friend class RotationFailedMessage;
 	friend class ::RemoteSerializer;
 	friend class ::RotationTimer;
+	friend class ::ManualTimer;
 
 	// Instantiates a new WriterBackend of the given type (note that
 	// doing so creates a new thread!).
@@ -175,7 +180,7 @@ protected:
 	// Takes ownership of fields and info.
 	WriterFrontend* CreateWriter(EnumVal* id, EnumVal* writer, WriterBackend::WriterInfo* info,
 				int num_fields, const threading::Field* const* fields,
-				bool local, bool remote, bool from_remote, const string& instantiating_filter="");
+				     bool local, bool remote, bool from_remote, const string& instantiating_filter="", double opentime=network_time);
 
 	// Takes ownership of values..
 	bool Write(EnumVal* id, EnumVal* writer, string path,

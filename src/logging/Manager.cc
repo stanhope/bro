@@ -100,6 +100,8 @@ struct Manager::Stream {
 	RecordType* columns;
 	EventHandlerPtr event;
 	list<Filter*> filters;
+        double next_rotate; // @componentry, manual rotation support
+        double manual_interval; // @componentry, manual rotation support
 
 	typedef pair<int, string> WriterPathPair;
 
@@ -370,6 +372,10 @@ bool Manager::CreateStream(EnumVal* id, RecordVal* sval)
 	streams[idx]->name = id->Type()->AsEnumType()->Lookup(idx);
 	streams[idx]->event = event ? event_registry->Lookup(event->Name()) : 0;
 	streams[idx]->columns = columns->Ref()->AsRecordType();
+
+	ID* manual_rotation_id = global_scope()->Lookup("Log::manual_rotation_interval");
+	double manual_interval = manual_rotation_id->ID_Val()->AsInterval();
+	streams[idx]->manual_interval =  manual_interval;
 
 	DBG_LOG(DBG_LOGGING, "Created new logging stream '%s', raising event %s",
 		streams[idx]->name.c_str(), event ? streams[idx]->event->Name() : "<none>");
@@ -707,7 +713,12 @@ bool Manager::RemoveFilter(EnumVal* id, string name)
 	}
 
 bool Manager::Write(EnumVal* id, RecordVal* columns)
-	{
+{
+  return WriteAt(0, id, columns);
+}
+
+bool Manager::WriteAt(double t, EnumVal* id, RecordVal* columns) 
+{
 	bool error = false;
 
 	Stream* stream = FindStream(id);
@@ -852,8 +863,8 @@ bool Manager::Write(EnumVal* id, RecordVal* columns)
 			{
 			// We know this writer already.
 			writer = w->second->writer;
-			}
 
+			}
 		else
 			{
 			// No, need to create one.
@@ -874,7 +885,7 @@ bool Manager::Write(EnumVal* id, RecordVal* columns)
 
 			TableEntryVal* v;
 			while ( (v = filter->config->AsTable()->NextEntry(k, c)) )
-				{
+			  {
 				ListVal* index = filter->config->RecoverIndex(k);
 				string key = index->Index(0)->AsString()->CheckString();
 				string value = v->Value()->AsString()->CheckString();
@@ -887,7 +898,7 @@ bool Manager::Write(EnumVal* id, RecordVal* columns)
 
 			writer = CreateWriter(stream->id, filter->writer,
 					      info, filter->num_fields, arg_fields, filter->local,
-					      filter->remote, false, filter->name);
+					      filter->remote, false, filter->name, t != 0 ? t : network_time);
 
 			if ( ! writer )
 				{
@@ -895,6 +906,14 @@ bool Manager::Write(EnumVal* id, RecordVal* columns)
 				return false;
 				}
 			}
+
+		// @componentry, manual/streaming rotate that DOES NOT depend on timer and keeps rotations aligned with wall clock intervals
+		if (t >= stream->next_rotate) {
+		  WriterInfo* winfo = FindWriter(writer);
+		  log_mgr->Rotate(winfo);
+		  winfo->open_time = stream->next_rotate;
+		  stream->next_rotate += stream->manual_interval;
+		}
 
 		// Alright, can do the write now.
 
@@ -1087,7 +1106,7 @@ threading::Value** Manager::RecordToFilterVals(Stream* stream, Filter* filter,
 
 WriterFrontend* Manager::CreateWriter(EnumVal* id, EnumVal* writer, WriterBackend::WriterInfo* info,
 				int num_fields, const threading::Field* const*  fields, bool local, bool remote, bool from_remote,
-				const string& instantiating_filter)
+				      const string& instantiating_filter, double write_time)
 	{
 	Stream* stream = FindStream(id);
 
@@ -1113,6 +1132,14 @@ WriterFrontend* Manager::CreateWriter(EnumVal* id, EnumVal* writer, WriterBacken
 	winfo->info = info;
 	winfo->from_remote = from_remote;
 	winfo->instantiating_filter = instantiating_filter;
+
+	double manual_interval = stream->manual_interval;
+
+	if (manual_interval != 0) {
+	  double delta_t = calc_next_rotate(write_time, manual_interval, 0);
+	  stream->next_rotate = write_time  + delta_t;
+	  winfo->open_time = stream->next_rotate - manual_interval;
+	}
 
 	// Search for a corresponding filter for the writer/path pair and use its
 	// rotation settings.  If no matching filter is found, fall back on
@@ -1277,14 +1304,26 @@ bool Manager::Flush(EnumVal* id)
 
 void Manager::Terminate()
 	{
+	ID* id = global_scope()->Lookup("Log::manual_rotation_interval");
+	double manual_interval = id->ID_Val()->AsInterval();
+
 	for ( vector<Stream *>::iterator s = streams.begin(); s != streams.end(); ++s )
 		{
 		if ( ! *s )
 			continue;
 
 		for ( Stream::WriterMap::iterator i = (*s)->writers.begin();
-		      i != (*s)->writers.end(); i++ )
-			i->second->writer->Stop();
+		      i != (*s)->writers.end(); i++ ) {
+		        
+		  // @componentry, force final rotation
+		  if (manual_interval != 0) {
+		    // fprintf(stderr, "Forcing manual rotate %s - Terminated\n", i->second->writer->Name());
+		    WriterInfo* winfo = FindWriter(i->second->writer);
+		    log_mgr->Rotate(winfo);
+		  }
+
+		  i->second->writer->Stop();
+		}
 		}
 	}
 
@@ -1326,6 +1365,65 @@ void RotationTimer::Dispatch(double t, int is_expire)
 		log_mgr->InstallRotationTimer(winfo);
 		}
 	}
+
+// Timer which on dispatching raises an event
+class ManualTimer : public Timer {
+public:
+  ManualTimer(double arg_start, double arg_interval) 
+    : Timer(arg_start, TIMER_ROTATE){ 
+    start = arg_start; 
+    interval = arg_interval;
+  }
+  ~ManualTimer();
+  void Dispatch(double t, int is_expire);
+protected:
+  double start;
+  double interval;
+};
+
+ManualTimer::~ManualTimer()
+	{
+	}
+
+void ManualTimer::Dispatch(double t, int is_expire)
+{
+  //  fprintf(stderr, "ManualTimer::Dispatch %f is_expire=%d start=%f interval=%f net=%f\n", t, is_expire, start, interval, network_time);
+  RecordVal* info = new RecordVal(BifType::Record::Log::ManualTimerInfo);
+  info->Assign(0, new Val(start, TYPE_DOUBLE));
+  info->Assign(1, new Val(t, TYPE_DOUBLE));
+  info->Assign(2, new Val(interval, TYPE_DOUBLE));
+  info->Assign(3, new Val(is_expire, TYPE_BOOL));
+
+  ID* id = global_scope()->Lookup("Log::default_manual_timer_callback");
+  Func* func = id->ID_Val()->AsFunc();
+  assert(func);
+
+  // Call the postprocessor function.
+  val_list vl(1);
+  vl.append(info);
+  int result = 0;
+  Val* v = func->Call(&vl);
+  if ( v )
+    {
+      result = v->AsBool();
+      Unref(v);
+    }
+
+  if ( ! is_expire && result != 0)
+    {
+      log_mgr->InstallManualTimer(start+interval, interval);
+    }
+}
+
+bool Manager::InstallManualTimer(double t, double delta)
+{
+  // fprintf(stderr, "InstallManualTimer %f %f\n", t, delta);
+  if ( terminating )
+    return false;
+  ManualTimer* timer = new ManualTimer(t, delta);
+  timer_mgr->Add(timer);
+  return true;
+}
 
 void Manager::InstallRotationTimer(WriterInfo* winfo)
 	{

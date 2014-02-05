@@ -1007,6 +1007,18 @@ function unique_id_from%(pool: int, prefix: string%) : string
 #
 # ===========================================================================
 
+## Returns the length (size) of the table/set.
+##
+## v: The set or table
+function length%(v: any%): count
+	%{
+	if ( v->Type()->Tag() == TYPE_TABLE )
+		return new Val(v->AsTableVal()->Size(), TYPE_COUNT);
+	else
+		builtin_error("length() requires a table/set argument");
+	return 0;
+	%}
+
 ## Removes all elements from a set or table.
 ##
 ## v: The set or table
@@ -1060,6 +1072,28 @@ function resize%(aggr: any, newsize: count%) : count
 		}
 
 	return new Val(aggr->AsVectorVal()->Resize(newsize), TYPE_COUNT);
+	%}
+
+## @componentry - added Jan 2014
+## Resizes a vector and initialize with 0. 
+##
+## aggr: The vector instance.
+##
+## newsize: The new size of *aggr*.
+##
+## Returns: The old size of *aggr*, or 0 if *aggr* is not a :bro:type:`vector`.
+function resize_and_clear%(v: any, newsize: count%) : any
+	%{
+	if ( v->Type()->Tag() != TYPE_VECTOR )
+		{
+		builtin_error("resize() operates on vectors");
+		return 0;
+		}
+	v->AsVectorVal()->Resize(newsize);
+	VectorVal* vv = v->AsVectorVal();
+	for ( unsigned int i = 0; i < vv->Size(); ++i )
+	    vv->Assign(i, new Val(0, TYPE_INT));
+	return 0;
 	%}
 
 ## Tests whether a boolean vector (``vector of bool``) has *any* true
@@ -2015,6 +2049,20 @@ function bro_is_terminating%(%): bool
 	%{
 	return new Val(terminating, TYPE_BOOL);
 	%}
+
+
+## Checks if Bro is tracing to file.
+##
+## Returns: True if Bro a tracefile has been defined @ startup.
+##
+function is_tracing%(%): string
+%{
+	if (writefile) {
+		return new StringVal(writefile);
+	} else {
+		return new StringVal("");
+	}
+%}
 
 ## Returns the hostname of the machine Bro runs on.
 ##
@@ -4134,6 +4182,110 @@ function rotate_file_by_name%(f: string%): rotate_info
 	return info;
 	%}
 
+function rotate_file_to_name%(f: string, to_name: string, is_terminating:bool%): rotate_info
+	%{
+	RecordVal* info = new RecordVal(rotate_info);
+
+	bool is_pkt_dumper = false;
+	bool is_addl_pkt_dumper = false;
+
+	// Special case: one of current dump files.
+	if ( pkt_dumper && streq(pkt_dumper->FileName(), f->CheckString()) )
+		{
+		is_pkt_dumper = true;
+		pkt_dumper->Close();
+		}
+
+	if ( addl_pkt_dumper &&
+	     streq(addl_pkt_dumper->FileName(), f->CheckString()) )
+		{
+		is_addl_pkt_dumper = true;
+		addl_pkt_dumper->Close();
+		}
+
+	FILE* file = rotate_file_to_name(f->CheckString(), to_name->CheckString(), info);
+	if ( ! file )
+		{
+		// Record indicating error.
+		info->Assign(0, new StringVal(""));
+		info->Assign(1, new StringVal(""));
+		info->Assign(2, new Val(0, TYPE_TIME));
+		info->Assign(3, new Val(0, TYPE_TIME));
+		return info;
+		}
+
+	fclose(file);
+
+	if ( is_pkt_dumper )
+		{
+		if (!is_terminating) {
+  		  pkt_dumper->Open();
+		  info->Assign(2, new Val(pkt_dumper->OpenTime(), TYPE_TIME));
+		} else {
+		    unlink(pkt_dumper->FileName());
+		    delete pkt_dumper;
+                    pkt_dumper = 0;
+		    info->Assign(2, new Val(0, TYPE_TIME));
+		}
+	}
+
+	if ( is_addl_pkt_dumper )
+		info->Assign(2, new Val(addl_pkt_dumper->OpenTime(), TYPE_TIME));
+
+	return info;
+	%}
+
+function pkt_dumper_init%(f: string%): bool
+%{
+	bool is_pkt_dumper = false;
+	if (pkt_dumper)
+	{
+		return new Val(false, TYPE_BOOL);
+	} else {
+		pktdumper_init(f->CheckString());
+		return new Val(true, TYPE_BOOL);
+	}
+%}
+
+function file_exists%(f:string%):bool
+%{
+    bool exists = false;
+    if( access( f->CheckString(), F_OK ) != -1 ) {
+	// file exists
+	exists = true;
+    }
+    return new Val(exists, TYPE_BOOL);
+%}
+
+function pkt_dumper_open%(f: string%):time
+%{
+	if ( pkt_dumper && streq(pkt_dumper->FileName(), f->CheckString()) )
+	{
+	  return new Val(pkt_dumper->OpenTime(), TYPE_TIME);
+	} 
+	return new Val(0, TYPE_TIME);
+%}
+
+function pkt_dumper_close%(f: string%):bool
+%{
+	if ( pkt_dumper && streq(pkt_dumper->FileName(), f->CheckString()) )
+	{
+	  pkt_dumper->Close();
+	  delete pkt_dumper;
+	  pkt_dumper = 0;
+	  return new Val(true, TYPE_BOOL);
+	} 
+	return new Val(false, TYPE_BOOL);
+%}
+
+function pkt_dumper_file%(%):string
+%{
+	if ( pkt_dumper)
+	   return new StringVal(pkt_dumper->FileName());
+	return new StringVal("");
+%}
+
+
 ## Calculates the duration until the next time a file is to be rotated, based
 ## on a given rotate interval.
 ##
@@ -4149,6 +4301,18 @@ function calc_next_rotate%(i: interval%) : interval
 
 	double base = parse_rotate_base_time(base_time);
 	return new Val(calc_next_rotate(network_time, i, base), TYPE_INTERVAL);
+	%}
+
+##
+## Returns: The duration until the next file rotation time from a specified base time.
+##
+function calc_next_rotate_from%(t:time, i: interval%) : interval
+	%{
+	const char* base_time = log_rotate_base_time ?
+		log_rotate_base_time->AsString()->CheckString() : 0;
+
+	double base = parse_rotate_base_time(base_time);
+	return new Val(calc_next_rotate(t, i, base), TYPE_INTERVAL);
 	%}
 
 ## Returns the size of a given file.

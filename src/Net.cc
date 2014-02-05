@@ -144,6 +144,22 @@ RETSIGTYPE watchdog(int /* signo */)
 	return RETSIGVAL;
 	}
 
+void pktdumper_init(const char* writefile) {
+
+  // ### This will fail horribly if there are multiple
+  // interfaces with different-lengthed media.
+  pkt_dumper = new PktDumper(writefile);
+  if ( pkt_dumper->IsError() )
+    reporter->FatalError("%s: can't open write file \"%s\" - %s\n",
+			 prog, writefile, pkt_dumper->ErrorMsg());
+  
+  ID* id = global_scope()->Lookup("trace_output_file");
+  if ( ! id )
+    reporter->Error("trace_output_file not defined in bro.init");
+  else
+    id->SetVal(new StringVal(writefile));
+}
+
 void net_init(name_list& interfaces, name_list& readfiles,
 	      name_list& netflows, name_list& flowfiles,
 	        const char* writefile, const char* filter,
@@ -270,18 +286,7 @@ void net_init(name_list& interfaces, name_list& readfiles,
 
 	if ( writefile )
 		{
-		// ### This will fail horribly if there are multiple
-		// interfaces with different-lengthed media.
-		pkt_dumper = new PktDumper(writefile);
-		if ( pkt_dumper->IsError() )
-			reporter->FatalError("%s: can't open write file \"%s\" - %s\n",
-				prog, writefile, pkt_dumper->ErrorMsg());
-
-		ID* id = global_scope()->Lookup("trace_output_file");
-		if ( ! id )
-			reporter->Error("trace_output_file not defined in bro.init");
-		else
-			id->SetVal(new StringVal(writefile));
+		  pktdumper_init(writefile);
 		}
 
 	init_ip_addr_anonymizers();

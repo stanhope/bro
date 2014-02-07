@@ -4282,7 +4282,24 @@ function pkt_dumper_file%(%):string
 %{
 	if ( pkt_dumper)
 	   return new StringVal(pkt_dumper->FileName());
-	return new StringVal("");
+        if (writefile != 0)
+	   return new StringVal(writefile);
+	else 
+	   return new StringVal("");
+%}
+
+function pkt_dumper_set%(f:string%):string
+%{
+	if (writefile != 0) {
+	if ( pkt_dumper && streq(pkt_dumper->FileName(), f->CheckString()) )
+	{
+	  pkt_dumper->Close();
+	  delete pkt_dumper;
+	  pkt_dumper = 0;
+	}}
+	writefile = (char*)f->CheckString();
+	pktdumper_init(f->CheckString());
+	return new StringVal(writefile);	
 %}
 
 

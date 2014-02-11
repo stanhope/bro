@@ -49,11 +49,12 @@ redef Log::manual_rotation_interval = 1min;
 
 global do_aggregates=T;
 global do_details=T;
-global do_zone_counts=F;
-global do_anyrd_counts=F;
-global do_hostname_counts=F;
-global do_pcaps=F;
+global do_zone_counts=T;
+global do_anyrd_counts=T;
+global do_hostname_counts=T;
 global do_client_counts=T;
+global do_pcaps=F;
+global log_all_zones=T;
 
 const dns_ports = { 53/udp, 53/tcp };
 redef likely_server_ports += { likely_server_ports };
@@ -343,7 +344,7 @@ export {
 		hostname: string &log;
 		mid: count &log;
 		client: string &log;
-                tlz: string;
+                tlz: string &default="";
                 opcode: count &log;
 	};
 
@@ -463,8 +464,9 @@ redef record connection += {
 };
 
 type ClientCount: record {
-     ip: addr &log;
-     cnt: count &log &default=1;
+ ts: double &log &default=0.0;
+ ip: addr &log;
+ cnt: count &log &default=1;
 };
 
 global client_counts_start:count = 0;
@@ -568,17 +570,26 @@ function log_anyrd_counts(ts:double) {
 }
 
 function log_client_counts(ts:double) {
-    if (do_client_counts) {
-	sort(client_counts, client_count_sorter);
-	for (item in client_counts) {
-	    Log::write_at(ts, DBIND9::CLIENT_COUNTS, client_counts[item]);
-	    if (item+1 == client_counts_max)
-		break;
-	}
-	client_counts_start = 0;
-	client_counts = vector();
-	client_counts_idx = table();
+  if (do_client_counts) {
+    if (length(client_counts) > 0) {
+      sort(client_counts, client_count_sorter);
+      for (item in client_counts) {
+	local info = client_counts[item];
+	info$ts = ts;
+	Log::write_at(ts, DBIND9::CLIENT_COUNTS, info);
+	if (item+1 == client_counts_max)
+	  break;
+      }
+      client_counts_start = 0;
+      client_counts = vector();
+      client_counts_idx = table();
+    } else {
+      local empty_item: ClientCount;
+      empty_item$ts = ts;
+      empty_item$cnt = 0;
+      Log::write_at(ts, DBIND9::CLIENT_COUNTS, empty_item);
     }
+  }
 }
 
 ## Dump the global counts data
@@ -591,8 +602,9 @@ function log_aggregates(ts:double) {
 	local ts_time:time = double_to_time(ts);
 
 	CNTS$ts = ts_time;
-	CNTS$tss = strftime("%y%m%d_%H%M%S", ts_time);
+#	CNTS$tss = strftime("%y%m%d_%H%M%S", ts_time);
 	Log::write_at(ts, DBIND9::COUNTS, CNTS);
+	print fmt("log %f reqs=%d", ts, CNTS$request);
 
         ## Clear the counters. Would be better to store them in a record and simply create a new record
  	CNTS$request = 0;
@@ -744,6 +756,14 @@ event config_change(description: Input::TableDescription, tpe: Input::Event, lef
     }
 }
 
+function CreateLogStream(id: Log::ID, config: Log::Stream, path:string) {
+  Log::create_stream(id, config);
+  Log::remove_default_filter(id);
+  Log::add_filter(id, [$name=path, $path=path, $postprocessor=custom_rotate]);
+# If we want only CSV single header line, specify the 'tsv' option
+#  Log::add_filter(id, [$name=path, $path=path, $postprocessor=custom_rotate, $config=table(["tsv"] = "T")]);
+}
+
 event Input::end_of_data(name: string, source: string)
 {
     if (name == path_config_zones) {
@@ -755,45 +775,36 @@ event Input::end_of_data(name: string, source: string)
 	config_loaded = T;
     }
     if (zones_loaded && config_loaded) {
-       Analyzer::register_for_ports(Analyzer::ANALYZER_DNS, dns_ports);
-
-	Log::create_stream(DBIND9::DETAILS, [$columns=Info]);
-	Log::remove_default_filter(DBIND9::DETAILS);
-	Log::add_filter(DBIND9::DETAILS, [$name="details", $path=path_log_details, $postprocessor=custom_rotate]);
-
-	Log::create_stream(DBIND9::ZONE_COUNTS, [$columns=ZoneCounts]);
-	Log::remove_default_filter(DBIND9::ZONE_COUNTS);
-	Log::add_filter(DBIND9::ZONE_COUNTS, [$name="zones", $path=path_log_zones, $postprocessor=custom_rotate]);
-
-	Log::create_stream(DBIND9::HOSTNAMES, [$columns=HostCount]);
-	Log::remove_default_filter(DBIND9::HOSTNAMES);
-	Log::add_filter(DBIND9::HOSTNAMES, [$name="hostnames", $path=path_log_hostnames, $postprocessor=custom_rotate]);
-
-	Log::create_stream(DBIND9::CLIENT_COUNTS, [$columns=ClientCount]);
-	Log::remove_default_filter(DBIND9::CLIENT_COUNTS);
-#	Log::add_filter(DBIND9::CLIENT_COUNTS, [$name="clients", $path="clients", $postprocessor=custom_rotate, $config=table(["tsv"] = "T")]);
-	Log::add_filter(DBIND9::CLIENT_COUNTS, [$name="clients", $path=path_log_clients, $postprocessor=custom_rotate]);
-
-	Log::create_stream(DBIND9::COUNTS, [$columns=Counts]);
-	Log::remove_default_filter(DBIND9::COUNTS);
-	Log::add_filter(DBIND9::COUNTS, [$name="counts", $path=path_log_counts, $postprocessor=custom_rotate]);
-
-	Log::create_stream(DBIND9::ANY_RD_COUNTS, [$columns=ANY_RD_Count]);
-	Log::remove_default_filter(DBIND9::ANY_RD_COUNTS);
-	Log::add_filter(DBIND9::ANY_RD_COUNTS, [$name="any_rd_counts", $path=path_log_anyrd, $postprocessor=custom_rotate]);
-
+#       CreateLogStream(DBIND9::DETAILS, [$columns=Info], path_log_details);
+#       CreateLogStream(DBIND9::ZONE_COUNTS, [$columns=ZoneCounts], path_log_zones);
+#       CreateLogStream(DBIND9::HOSTNAMES, [$columns=HostCount], path_log_hostnames);
+#       CreateLogStream(DBIND9::CLIENT_COUNTS, [$columns=ClientCount], path_log_clients);
+#       CreateLogStream(DBIND9::COUNTS, [$columns=Counts], path_log_counts);
+#       CreateLogStream(DBIND9::ANY_RD_COUNTS, [$columns=ANY_RD_Count], path_log_anyrd);
+#       Analyzer::register_for_ports(Analyzer::ANALYZER_DNS, dns_ports);
     }
 }
 
 event bro_init() &priority=5
 {
+  CreateLogStream(DBIND9::DETAILS, [$columns=Info], path_log_details);
+  CreateLogStream(DBIND9::ZONE_COUNTS, [$columns=ZoneCounts], path_log_zones);
+  CreateLogStream(DBIND9::HOSTNAMES, [$columns=HostCount], path_log_hostnames);
+  CreateLogStream(DBIND9::CLIENT_COUNTS, [$columns=ClientCount], path_log_clients);
+  CreateLogStream(DBIND9::COUNTS, [$columns=Counts], path_log_counts);
+  CreateLogStream(DBIND9::ANY_RD_COUNTS, [$columns=ANY_RD_Count], path_log_anyrd);
+  Analyzer::register_for_ports(Analyzer::ANALYZER_DNS, dns_ports);
+
     if (reading_live_traffic()) {
         pkt_dumper_set(path_log_pcaps);
         local delta:double = init_manual_rotate(current_time());
 	print fmt("BRO_INIT clock=%f net=%f reading_live=%d reading_traces=%d tracing=%d rotate_in=%f next_rotate=%f trace=%s", time_to_double(current_time()), time_to_double(network_time()), reading_live_traffic(), reading_traces(), do_pcaps, delta, next_rotate, path_log_pcaps);
+	log_all_zones = F;
+	Input::add_table([$source=path_config_dbind, $name=path_config_dbind, $idx=ConfigIdx, $val=ConfigRecord, $destination=config, $ev=config_change, $mode=Input::REREAD]);
+	Input::add_table([$source=path_config_zones, $name=path_config_zones, $idx=ZoneIdx, $destination=zones_to_log, $mode=Input::REREAD]);
+    } else {
+      log_all_zones = T;
     }
-    Input::add_table([$source=path_config_dbind, $name=path_config_dbind, $idx=ConfigIdx, $val=ConfigRecord, $destination=config, $ev=config_change, $mode=Input::REREAD]);
-    Input::add_table([$source=path_config_zones, $name=path_config_zones, $idx=ZoneIdx, $destination=zones_to_log, $mode=Input::REREAD]);
 }
 
 event bro_done()
@@ -858,7 +869,7 @@ function new_session(c: connection, trans_id: count): Info
 function build_dbind_flags_and_log(info: Info) {
     # Build DBIND style flags, see => http://jpmens.net/2011/02/22/bind-querylog-know-your-flags/
     # TODO: S flag (signed response requested)
-    if (info$tlz in zones_to_log) {
+    if (log_all_zones || info$tlz in zones_to_log) {
 ++CNTS$logged;
 	if (info$RD) 
 	    info$flags = "+";

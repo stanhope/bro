@@ -1009,13 +1009,15 @@ function unique_id_from%(pool: int, prefix: string%) : string
 
 ## Returns the length (size) of the table/set.
 ##
-## v: The set or table
+## v: The set or table or vector
 function length%(v: any%): count
 	%{
 	if ( v->Type()->Tag() == TYPE_TABLE )
 		return new Val(v->AsTableVal()->Size(), TYPE_COUNT);
+	else if ( v->Type()->Tag() == TYPE_VECTOR )
+		return new Val(v->AsVectorVal()->Size(), TYPE_COUNT);
 	else
-		builtin_error("length() requires a table/set argument");
+		builtin_error("length() requires a table/set/vector argument");
 	return 0;
 	%}
 

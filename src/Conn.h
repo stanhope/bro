@@ -261,6 +261,7 @@ public:
 		{ return encapsulation; }
 
 	void CheckFlowLabel(bool is_orig, uint32 flow_label);
+	const uint32 GetOrigFlowLabel() { return orig_flow_label;}
 
 protected:
 

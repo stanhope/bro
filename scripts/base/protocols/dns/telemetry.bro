@@ -48,13 +48,13 @@ redef Log::manual_rotation_interval = 1min;
 #redef Log::manual_rotation_interval = 15sec;
 
 global do_aggregates=T;
-global do_details=T;
-global do_zone_counts=T;
-global do_anyrd_counts=T;
-global do_hostname_counts=T;
-global do_client_counts=T;
+global do_details=F;
+global do_zone_counts=F;
+global do_anyrd_counts=F;
+global do_hostname_counts=F;
+global do_client_counts=F;
 global do_pcaps=F;
-global log_all_zones=T;
+global log_all_zones=F;
 
 const dns_ports = { 53/udp, 53/tcp };
 redef likely_server_ports += { likely_server_ports };
@@ -110,10 +110,10 @@ global time_network_last:double=0;
 
 global next_rotate:double = 0;
 global hostname:string = gethostname();
-global valid_hostnames:set[addr] = {10.151.43.122, [::1]};
+global valid_hostnames:set[addr] = {10.151.43.122, [::1], 172.16.200.69, 127.0.0.1};
 
 type ConfigRecord: record {
-    aggregates: bool;
+    counts: bool;
     details: bool;
     zones: bool;
     anyrd: bool;
@@ -592,6 +592,8 @@ function log_client_counts(ts:double) {
   }
 }
 
+global c_request:count = 0;
+
 ## Dump the global counts data
 function log_aggregates(ts:double) {
     if (do_aggregates) {
@@ -672,16 +674,18 @@ function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
 	    idle -= 1;
 	    ts += 1;
 	}
-	if (idle >= 1) {
+	if (do_aggregates) {
+	  if (idle >= 1) {
 	    local blanks_after:vector of int={};
 	    resize_and_clear(blanks_after, double_to_count(idle));
 	    for (blank in blanks_after) {
-		local item: Counts;
-		item$ts = double_to_time(ts);
-		item$tss = strftime("%y%m%d_%H%M%S", item$ts);
-		Log::write_at(ts, DBIND9::COUNTS, item);
-		ts += 1;
+	      local item: Counts;
+	      item$ts = double_to_time(ts);
+	      item$tss = strftime("%y%m%d_%H%M%S", item$ts);
+	      Log::write_at(ts, DBIND9::COUNTS, item);
+	      ts += 1;
 	    }
+	  }
 	}
 	log_zone_counts(next_rotate-1);
 	log_anyrd_counts(next_rotate-1);
@@ -694,8 +698,6 @@ function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
 	    local new_name:string = fmt("%s.%s-%06f", path_log_pcaps, open_time, network_time());
 	    local rinfo:rotate_info = rotate_file_to_name(path_log_pcaps, new_name, info$is_expire);
 	    print fmt("Rotated %s", rinfo);
-	} else {
-	    print fmt("Not rotating PCAPS");
 	}
 	next_rotate += info$timer_interval;
     }	
@@ -734,7 +736,7 @@ event config_change(description: Input::TableDescription, tpe: Input::Event, lef
     current_config_idx = left;
     local item:ConfigRecord = config[left$ts];
     if (tpe == Input::EVENT_NEW || tpe == Input::EVENT_CHANGED) {
-	do_aggregates = item$aggregates;
+	do_aggregates = item$counts;
 	do_details = item$details;
 	do_zone_counts = item$zones;
 	do_anyrd_counts = item$anyrd;
@@ -781,19 +783,19 @@ event Input::end_of_data(name: string, source: string)
 #       CreateLogStream(DBIND9::CLIENT_COUNTS, [$columns=ClientCount], path_log_clients);
 #       CreateLogStream(DBIND9::COUNTS, [$columns=Counts], path_log_counts);
 #       CreateLogStream(DBIND9::ANY_RD_COUNTS, [$columns=ANY_RD_Count], path_log_anyrd);
-#       Analyzer::register_for_ports(Analyzer::ANALYZER_DNS, dns_ports);
+      if (do_details || do_zone_counts || do_hostname_counts || do_client_counts || do_anyrd_counts || do_aggregates)
+	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS, dns_ports);
     }
 }
 
 event bro_init() &priority=5
 {
-  CreateLogStream(DBIND9::DETAILS, [$columns=Info], path_log_details);
-  CreateLogStream(DBIND9::ZONE_COUNTS, [$columns=ZoneCounts], path_log_zones);
-  CreateLogStream(DBIND9::HOSTNAMES, [$columns=HostCount], path_log_hostnames);
-  CreateLogStream(DBIND9::CLIENT_COUNTS, [$columns=ClientCount], path_log_clients);
-  CreateLogStream(DBIND9::COUNTS, [$columns=Counts], path_log_counts);
-  CreateLogStream(DBIND9::ANY_RD_COUNTS, [$columns=ANY_RD_Count], path_log_anyrd);
-  Analyzer::register_for_ports(Analyzer::ANALYZER_DNS, dns_ports);
+  if (do_details) CreateLogStream(DBIND9::DETAILS, [$columns=Info], path_log_details);
+  if (do_zone_counts) CreateLogStream(DBIND9::ZONE_COUNTS, [$columns=ZoneCounts], path_log_zones);
+  if (do_hostname_counts) CreateLogStream(DBIND9::HOSTNAMES, [$columns=HostCount], path_log_hostnames);
+  if (do_client_counts) CreateLogStream(DBIND9::CLIENT_COUNTS, [$columns=ClientCount], path_log_clients);
+  if (do_aggregates) CreateLogStream(DBIND9::COUNTS, [$columns=Counts], path_log_counts);
+  if (do_anyrd_counts) CreateLogStream(DBIND9::ANY_RD_COUNTS, [$columns=ANY_RD_Count], path_log_anyrd);
 
     if (reading_live_traffic()) {
         pkt_dumper_set(path_log_pcaps);
@@ -803,12 +805,18 @@ event bro_init() &priority=5
 	Input::add_table([$source=path_config_dbind, $name=path_config_dbind, $idx=ConfigIdx, $val=ConfigRecord, $destination=config, $ev=config_change, $mode=Input::REREAD]);
 	Input::add_table([$source=path_config_zones, $name=path_config_zones, $idx=ZoneIdx, $destination=zones_to_log, $mode=Input::REREAD]);
     } else {
-      log_all_zones = T;
+      do_pcaps = F;
+      log_all_zones = F;
+      if (do_details || do_zone_counts || do_hostname_counts || do_client_counts || do_anyrd_counts || do_aggregates)
+	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS, dns_ports);
     }
 }
 
 event bro_done()
 {
+    dns_dump_counters();
+    dns_dump_totals();
+	
     print fmt("bro_done clock=%f net=%f rotate=%f first=%f last=%f len=%d", current_time(), network_time(),next_rotate, time_network_first, time_network_last, length(zone_counts));
 }
 
@@ -1006,9 +1014,8 @@ hook set_session_hook(c: connection, msg: dns_msg, is_query: bool, len: count) &
 
 event dns_message(c: connection, is_orig: bool, msg: dns_msg, len: count) &priority=5
 	{
-#	    print fmt("dns_message %s", network_time());
 	    if (c$id$resp_h !in valid_hostnames) return;
-	    init_manual_rotate(network_time());
+#	    init_manual_rotate(network_time());
 	    hook set_session_hook(c, msg, is_orig, len);
 	}
 
@@ -1192,67 +1199,12 @@ event dns_query_reply(c: connection, msg: dns_msg, query: string, qtype: count, 
     ++CNTS$reply;
 }
 
-event dns_A_reply(c: connection, msg: dns_msg, ans: dns_answer, a: addr) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, fmt("%s", a));
-}
-
-event dns_TXT_reply(c: connection, msg: dns_msg, ans: dns_answer, str: string) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, str);
-}
-
-event dns_AAAA_reply(c: connection, msg: dns_msg, ans: dns_answer, a: addr) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, fmt("%s", a));
-}
-
-event dns_A6_reply(c: connection, msg: dns_msg, ans: dns_answer, a: addr) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, fmt("%s", a));
-}
-
-event dns_NS_reply(c: connection, msg: dns_msg, ans: dns_answer, name: string) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, name);
-}
-
-event dns_CNAME_reply(c: connection, msg: dns_msg, ans: dns_answer, name: string) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, name);
-}
-
-event dns_MX_reply(c: connection, msg: dns_msg, ans: dns_answer, name: string, preference: count) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, name);
-}
-
-event dns_PTR_reply(c: connection, msg: dns_msg, ans: dns_answer, name: string) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, name);
-}
-
-event dns_SOA_reply(c: connection, msg: dns_msg, ans: dns_answer, soa: dns_soa) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, soa$mname);
-}
-
-event dns_WKS_reply(c: connection, msg: dns_msg, ans: dns_answer) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, "");
-}
-
-event dns_SRV_reply(c: connection, msg: dns_msg, ans: dns_answer) &priority=5
-{
-    event DBIND9::do_reply(c, msg, ans, "");
-}
-
 event dns_EDNS_addl(c: connection, msg: dns_msg, ans: dns_edns_additional)
 {
-    c$dns$bufsize = ans$payload_size;
-    c$dns$EDNS = T;
+        c$dns$bufsize = ans$payload_size;
+	c$dns$EDNS = T;
     if (ans$DO) {
-	c$dns$DO = T;
+    	c$dns$DO = T;
 	c$dns$EDNS_Version = ans$version;
     }
 }

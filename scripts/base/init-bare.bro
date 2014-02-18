@@ -3141,6 +3141,142 @@ const global_hash_seed: string = "" &redef;
 ## The maximum is currently 128 bits.
 const bits_per_uid: count = 96 &redef;
 
+
+## @componentry, dns_telemetry msg (same as dns_msg, different name to avoid conflict)
+type dns_telemetry_msg: record {
+	id: count;	##< Transaction ID.
+
+	opcode: count;	##< Operation code.
+	rcode: count;	##< Return code.
+
+	QR: bool;	##< Query response flag.
+	AA: bool;	##< Authoritative answer flag.
+	TC: bool;	##< Truncated packet flag.
+	RD: bool;	##< Recursion desired flag.
+	RA: bool;	##< Recursion available flag.
+	Z: count;	##< TODO.
+
+	num_queries: count;	##< Number of query records.
+	num_answers: count;	##< Number of answer records.
+	num_auth: count;	##< Number of authoritative records.
+	num_addl: count;	##< Number of additional records.
+};
+
+## @componentry, same as above EXCEPT with DO field added
+type dns_telemetry_edns_additional: record {
+	query: string;	##< Query.
+	qtype: count;	##< Query type.
+	t: count;	##< TODO.
+	payload_size: count;	##< TODO.
+	extended_rcode: count;	##< Extended return code.
+	version: count;	##< Version.
+	z_field: count;	##< TODO.
+	TTL: interval;	##< Time-to-live.
+	is_query: count;	##< TODO.
+	DO: bool;
+};
+
+type dns_telemetry_counts: record {
+ ts: double &log;
+ request: count &log;
+ rejected: count &log;
+ reply: count &log;
+ non_dns_request: count &log;
+
+ ANY_RD: count &log;
+ ANY: count &log;
+ A: count &log;
+ AAAA: count &log;
+ NS: count &log;
+ CNAME: count &log;
+ PTR: count &log;
+ SOA: count &log;
+ MX: count &log;
+ TXT: count &log;
+ SRV: count &log;
+ other: count &log;
+
+ TCP: count &log;
+ UDP: count &log;
+ TSIG: count &log;
+ EDNS: count &log;
+ RD: count &log;
+ DO: count &log;
+ CD: count &log;
+ V4: count &log;
+ V6: count &log;
+
+ OpQuery: count &log;
+ OpIQuery: count &log;
+ OpStatus: count &log;
+ OpNotify: count &log;
+ OpUpdate: count &log;
+ OpUnassigned: count &log;
+
+ rcode_NOERROR: count &log;
+ rcode_FORMERROR: count &log;
+ rcode_SERVFAIL: count &log;
+ rcode_NXDOMAIN: count &log;
+ rcode_NOTIMP: count &log;
+ rcode_REFUSED: count &log;
+
+ logged: count &log;
+};
+
+type dns_telemetry_anyrd_stats: record {
+ ts: double &log;
+ ip: string &log;
+ query: string &log;
+ cnt: count &log;
+};
+
+type dns_telemetry_client_stats: record {
+ ts: double &log;
+ ip: string &log;
+ cnt: count &log;
+ };
+
+type dns_telemetry_zone_stats: record {
+     ts: double &log;
+     key: string &log;
+     total: count &log &default=0;
+     ANY: count &log &default=0;
+     A: count &log &default=0;
+     AAAA: count &log &default=0;
+     CNAME: count &log &default=0;
+     NS: count &log &default=0;
+     SOA: count &log &default=0;
+     SRV: count &log &default=0;
+     TXT: count &log &default=0;
+     MX: count &log &default=0;
+     DO: count &log &default=0;
+     RD: count &log &default=0;
+     other: count &log &default=0;
+ NOERROR: count &log &default=0;
+ REFUSED: count &log &default=0;
+ NXDOMAIN: count &log &default=0;
+};
+
+type dns_telemetry_qname_stats: record {
+ ts: double &log;
+ q: string &log;
+ cnt: count &log &default=0;
+ A: count &log &default=0;
+ AAAA: count &log &default=0;
+ CNAME: count &log &default=0;
+ MX: count &log &default=0;
+ SOA: count &log &default=0;
+ TXT: count &log &default=0;
+ SRV: count &log &default=0;
+ NS: count &log &default=0;
+ other:count &log &default=0;
+};
+
+type dns_telemetry_detail: record {
+ ts: double &log;
+ q: string &log;
+};
+
 # Load BiFs defined by plugins.
 @load base/bif/plugins
 

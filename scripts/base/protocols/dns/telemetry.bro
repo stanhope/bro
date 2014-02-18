@@ -353,7 +353,6 @@ export {
 	type Counts: record {
 
 	ts:            time               &log &default=network_time();
-	tss:string &default="";
 	request: count &log &default=0;
 	rejected: count &log &default=0;
 	reply: count &log &default=0;
@@ -604,7 +603,6 @@ function log_aggregates(ts:double) {
 	local ts_time:time = double_to_time(ts);
 
 	CNTS$ts = ts_time;
-#	CNTS$tss = strftime("%y%m%d_%H%M%S", ts_time);
 	Log::write_at(ts, DBIND9::COUNTS, CNTS);
 	print fmt("log %f reqs=%d", ts, CNTS$request);
 
@@ -681,7 +679,6 @@ function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
 	    for (blank in blanks_after) {
 	      local item: Counts;
 	      item$ts = double_to_time(ts);
-	      item$tss = strftime("%y%m%d_%H%M%S", item$ts);
 	      Log::write_at(ts, DBIND9::COUNTS, item);
 	      ts += 1;
 	    }
@@ -814,9 +811,6 @@ event bro_init() &priority=5
 
 event bro_done()
 {
-    dns_dump_counters();
-    dns_dump_totals();
-	
     print fmt("bro_done clock=%f net=%f rotate=%f first=%f last=%f len=%d", current_time(), network_time(),next_rotate, time_network_first, time_network_last, length(zone_counts));
 }
 
@@ -852,7 +846,6 @@ function new_session(c: connection, trans_id: count): Info
 	    for (blank in blanks) {
 		local counts: Counts;
 		counts$ts = double_to_time(ts);
-		counts$tss = strftime("%y%m%d_%H%M%S", counts$ts);
 		Log::write_at(ts, DBIND9::COUNTS, counts);
 		ts += 1;
 	    }

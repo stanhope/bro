@@ -127,6 +127,13 @@ int dns_skip_all_auth;
 int dns_skip_all_addl;
 int dns_max_queries;
 
+RecordType* dns_telemetry_counts;
+RecordType* dns_telemetry_anyrd_stats;
+RecordType* dns_telemetry_client_stats;
+RecordType* dns_telemetry_zone_stats;
+RecordType* dns_telemetry_qname_stats;
+RecordType* dns_telemetry_detail;
+
 double stp_delta;
 double stp_idle_min;
 TableVal* stp_skip_src;
@@ -455,6 +462,13 @@ void init_net_var()
 	dns_skip_all_auth = opt_internal_int("dns_skip_all_auth");
 	dns_skip_all_addl = opt_internal_int("dns_skip_all_addl");
 	dns_max_queries = opt_internal_int("dns_max_queries");
+	
+	dns_telemetry_counts = internal_type("dns_telemetry_counts")->AsRecordType();
+	dns_telemetry_anyrd_stats = internal_type("dns_telemetry_anyrd_stats")->AsRecordType();
+	dns_telemetry_client_stats = internal_type("dns_telemetry_client_stats")->AsRecordType();
+	dns_telemetry_zone_stats = internal_type("dns_telemetry_zone_stats")->AsRecordType();
+	dns_telemetry_qname_stats = internal_type("dns_telemetry_qname_stats")->AsRecordType();
+	dns_telemetry_detail = internal_type("dns_telemetry_detail")->AsRecordType();
 
 	stp_delta = opt_internal_double("stp_delta");
 	stp_idle_min = opt_internal_double("stp_idle_min");

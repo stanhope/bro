@@ -3240,7 +3240,6 @@ type dns_telemetry_zone_stats: record {
      ts: double &log;
      key: string &log;
      total: count &log &default=0;
-     ANY: count &log &default=0;
      A: count &log &default=0;
      AAAA: count &log &default=0;
      CNAME: count &log &default=0;
@@ -3275,6 +3274,18 @@ type dns_telemetry_qname_stats: record {
 type dns_telemetry_detail: record {
  ts: double &log;
  q: string &log;
+ qtype: count &log;
+ rcode: count &log;
+ bufsize: count &log;
+ ttl: count &log;
+# server: addr &log;
+# client: addr &log;
+ server: string &log;
+ client: string &log;
+ qlen: count &log;
+ rlen: count &log;
+ opcode: count &log;
+  
 };
 
 # Load BiFs defined by plugins.

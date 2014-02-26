@@ -56,46 +56,6 @@ struct CurCounts {
   int rcode_nxdomain;
   int rcode_not_impl;
   int rcode_refused;
-};
-
-struct TotalCounts {
-  int request;
-  int rejected;
-  int reply;
-  int non_dns_request;
-  int ANY_RD;
-  int ANY;
-  int A;
-  int AAAA;
-  int NS;
-  int CNAME;
-  int PTR;
-  int SOA;
-  int MX;
-  int TXT;
-  int SRV;
-  int other;
-  int TCP;
-  int UDP;
-  int TSIG;
-  int EDNS;
-  int RD;
-  int DO;
-  int CD;
-  int V4;
-  int V6;
-  int OpQuery;
-  int OpIQuery;
-  int OpStatus;
-  int OpNotify;
-  int OpUpdate;
-  int OpUnassigned;
-  int rcode_noerror;
-  int rcode_format_err;
-  int rcode_server_fail;
-  int rcode_nxdomain;
-  int rcode_not_impl;
-  int rcode_refused;
   int logged;
 };
 
@@ -141,7 +101,7 @@ struct ZoneStats {
 };
 
 CurCounts CNTS;
-TotalCounts TOTALS;
+CurCounts TOTALS;
 
 bool do_counts = false;
 bool do_totals = false;
@@ -246,10 +206,21 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 
 	const u_char* msg_start = data;	// needed for interpreting compression
 
+	msg.rlen = 0;
+	if (is_query) {
+	  //	  fprintf(stderr, "%ul ParseQ is_query=%d len=%d rlen=%d\n", is_query, len, msg.rlen);
+	  msg.qlen = len;
+	}
+	else {
+	  //	  fprintf(stderr, "%ul ParseQ is_query=%d qlen=%d rlen=%d\n", is_query, msg.qlen, len);
+	  msg.rlen = len;
+	}
+
+
 	data += hdr_len;
 	len -= hdr_len;
 
-	if ( ! ParseQuestions(&msg, data, len, msg_start) )
+	if ( ! ParseQuestions(&msg, data, len, msg_start, is_query) )
 		{
 		EndMessage(&msg);
 		return 0;
@@ -324,7 +295,7 @@ int DNS_Telemetry_Interpreter::EndMessage(DNS_Telemetry_MsgInfo* msg)
 
 int DNS_Telemetry_Interpreter::ParseQuestions(DNS_Telemetry_MsgInfo* msg,
 				const u_char*& data, int& len,
-				const u_char* msg_start)
+					      const u_char* msg_start, int is_query)
 	{
 	int n = msg->qdcount;
 
@@ -339,7 +310,7 @@ int DNS_Telemetry_Interpreter::ParseQuestions(DNS_Telemetry_MsgInfo* msg,
 		return 1;
 		}
 
-	while ( n > 0 && ParseQuestion(msg, data, len, msg_start) )
+	while ( n > 0 && ParseQuestion(msg, data, len, msg_start, is_query) )
 		--n;
 	return n == 0;
 	}
@@ -438,6 +409,8 @@ void __dns_telemetry_fire_counts(double ts) {
       r->Assign(35, new Val(CNTS.rcode_nxdomain, TYPE_COUNT));
       r->Assign(36, new Val(CNTS.rcode_not_impl, TYPE_COUNT));
       r->Assign(37, new Val(CNTS.rcode_refused, TYPE_COUNT));
+
+      r->Assign(38, new Val(CNTS.logged, TYPE_COUNT));
       vl->append(r);
       mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
     }
@@ -503,7 +476,6 @@ void __dns_telemetry_fire_totals(double ts) {
       vl->append(__dns_telemetry_get_totals(ts));
       mgr.Dispatch(new Event(dns_telemetry_totals, vl), true);
     } 
-  memset(&TOTALS, 0, sizeof(TotalCounts));
 }
 
 void __dns_telemetry_fire_anyrd(double ts) {
@@ -599,14 +571,15 @@ void __dns_telemetry_fire_zones(double ts) {
 	    r->Assign(5, new Val(zv->CNAME, TYPE_COUNT));
 	    r->Assign(6, new Val(zv->NS, TYPE_COUNT));
 	    r->Assign(7, new Val(zv->SOA, TYPE_COUNT));
-	    r->Assign(8, new Val(zv->TXT, TYPE_COUNT));
-	    r->Assign(9, new Val(zv->SRV, TYPE_COUNT));
-	    r->Assign(10, new Val(zv->other, TYPE_COUNT));
+	    r->Assign(8, new Val(zv->SRV, TYPE_COUNT));
+	    r->Assign(9, new Val(zv->TXT, TYPE_COUNT));
+	    r->Assign(10, new Val(zv->MX, TYPE_COUNT));
 	    r->Assign(11, new Val(zv->DO, TYPE_COUNT));
 	    r->Assign(12, new Val(zv->RD, TYPE_COUNT));
-	    r->Assign(13, new Val(zv->NOERROR, TYPE_COUNT));
-	    r->Assign(14, new Val(zv->REFUSED, TYPE_COUNT));
-	    r->Assign(15, new Val(zv->NXDOMAIN, TYPE_COUNT));
+	    r->Assign(13, new Val(zv->other, TYPE_COUNT));
+	    r->Assign(14, new Val(zv->NOERROR, TYPE_COUNT));
+	    r->Assign(15, new Val(zv->REFUSED, TYPE_COUNT));
+	    r->Assign(16, new Val(zv->NXDOMAIN, TYPE_COUNT));
 	    val_list* vl = new val_list;
 	    vl->append(r);
 	    mgr.Dispatch(new Event(dns_telemetry_zone_info, vl), true);
@@ -629,6 +602,7 @@ void __dns_telemetry_fire_zones(double ts) {
 	r->Assign(13, new Val(0, TYPE_COUNT));
 	r->Assign(14, new Val(0, TYPE_COUNT));
 	r->Assign(15, new Val(0, TYPE_COUNT));
+	r->Assign(16, new Val(0, TYPE_COUNT));
 	val_list* vl = new val_list;
 	vl->append(r);
 	mgr.Dispatch(new Event(dns_telemetry_zone_info, vl), true);
@@ -687,31 +661,44 @@ void __dns_telemetry_fire_qnames(double ts) {
   telemetry_qname_stats.Clear();
 }
 
-bool get_tlz(const char* qname, char* tlz) {
-  if (strstr(qname, "funnyboy.com")) {
-    sprintf(tlz,"funnyboy.com");
-    return true;
-  } else if (strstr(qname, "funnyboy2.com")) {
-    sprintf(tlz,"funnyboy.com");
-    return true;
-  } else if (strstr(qname, "funnyboy8.com")) {
-    sprintf(tlz,"funnyboy8.com");
-    return true;
-  } else {
-    sprintf(tlz,"other");
-    return true;
-  }
-  return false;
+void ReverseQname(char *string, int length) 
+{
+  int c;
+  char *begin, *end, temp;
+ 
+  begin = string;
+  end = string;
+ 
+  for ( c = 0 ; c < ( length - 1 ) ; c++ )
+    end++;
+ 
+  for ( c = 0 ; c < length/2 ; c++ ) 
+    {        
+      temp = *end;
+      *end = *begin;
+      *begin = temp;
+ 
+      begin++;
+      end--;
+    }
 }
 
 int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 				const u_char*& data, int& len,
-				const u_char* msg_start)
+					     const u_char* msg_start, int is_query)
 	{
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start);
+	char key_host [255];
+	char key_zone [255];
+	char tlz [255];
+	u_char* name_end;
+	if (is_query) 
+	  name_end = ExtractName(data, len, name, name_len, msg_start, key_host, key_zone, tlz);
+	else 
+	  name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
+
 	if ( ! name_end )
 		return 0;
 
@@ -725,8 +712,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
 	ZoneStats* zv = 0;
 	if (do_zone_stats && dns_telemetry_zone_info) {
-	  char tlz[513];
-	  get_tlz((const char*)name, tlz);
+
 	  HashKey* zone_hash = new HashKey(tlz);
 	  zv = telemetry_zone_stats.Lookup(zone_hash);
 	  if (!zv) {
@@ -736,10 +722,11 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	    telemetry_zone_stats.Insert(zone_hash, zv);
 	  }
 	  delete zone_hash;
+	  
 	}
 
 	QnameStats* qname_stat = 0;
-	if (do_qname_stats&& dns_telemetry_qname_info) {
+	if (is_query && do_qname_stats && dns_telemetry_qname_info) {
 	  char qname_key[513];
 	  sprintf(qname_key, "%s", name);
 	  HashKey* qname_hash = new HashKey(qname_key);
@@ -748,6 +735,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	    qname_stat = new QnameStats();
 	    qname_stat->cnt = 0;
 	    telemetry_qname_stats.Insert(qname_hash, qname_stat);
+	  } else {
+	    ++qname_stat->cnt;
 	  }
 	  delete qname_hash;
 	}
@@ -762,15 +751,14 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  }
 	  if (do_zone_stats) {
 	    ++zv->cnt;
+	    if (msg->RD) {
+	      ++zv->RD;
+	    }
 	  }
-	  if (do_qname_stats) {
-	    ++qname_stat->cnt;
-	  }
-
+	
 	  const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
 	  string sAddr = orig_addr.AsString();
-
-	  if (do_client_stats) {
+	  if (is_query && do_client_stats) {
 	    char client_key[50];
 	    strcpy(client_key, sAddr.c_str()); 
 	    HashKey* client_hash = new HashKey(client_key);
@@ -784,6 +772,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  }
 
 	  RR_Type qtype = RR_Type(ExtractShort(data, len));
+	  msg->qtype = qtype;
 	  if (do_counts) {
 	    switch (qtype) 
 	      {
@@ -915,33 +904,58 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  dns_event = dns_telemetry_query_reply;
 
 	  if (do_details && dns_telemetry_detail_info) {
-	    char tlz[513];
-	    if (get_tlz((const char*)name, tlz)) {
-	      HashKey* zone_hash = new HashKey(tlz);
-	      if (zone_table.Lookup(zone_hash)) {
-		++TOTALS.logged;
-		val_list* vl = new val_list;
-		RecordVal* r = new RecordVal(dns_telemetry_detail);
-		r->Assign(0, new Val(network_time, TYPE_DOUBLE));
-		r->Assign(1, new StringVal((char*)name));
-		vl->append(r);
-		mgr.Dispatch(new Event(dns_telemetry_detail_info, vl), true);
-	      }
-	      delete zone_hash;
+
+	    HashKey* zone_hash = new HashKey(tlz);
+	    if (zone_table.Lookup(zone_hash)) {
+	      ++CNTS.logged;
+	      ++TOTALS.logged;
+
+	      const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
+	      const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
+	      char client_key[50];
+	      strcpy(client_key, orig_addr.AsString().c_str()); 
+
+	      // TODO: FIX THIS. Can't know until we shift this to RESPONSE processing.
+	      // Which also means that we can't know the RCODE.
+	      // Which also means that we need to maintain state in the analyzer (default DNS from BRO does this in .bro scriptland)
+
+	      char server_key[50];
+	      strcpy(server_key, resp_addr.AsString().c_str()); 
+
+	      //	      fprintf(stderr, "LOG %f %s qtype=%d rcode=%d qlen=%d rlen=%d\n", network_time, name, msg->qtype,msg->rcode,msg->qlen, msg->rlen);
+
+	      val_list* vl = new val_list;
+	      RecordVal* r = new RecordVal(dns_telemetry_detail);
+	      r->Assign(0, new Val(network_time, TYPE_DOUBLE));
+	      r->Assign(1, new StringVal((char*)name));
+	      r->Assign(2, new Val(msg->qtype, TYPE_COUNT));// RRType
+	      r->Assign(3, new Val(msg->rcode, TYPE_COUNT)); // rcode
+	      r->Assign(4, new Val(0, TYPE_COUNT)); // edns bufsize
+	      r->Assign(5, new Val(msg->ttl, TYPE_COUNT)); // ttl
+	      r->Assign(6, new StringVal(server_key)); // server
+	      r->Assign(7, new StringVal(client_key)); // client
+	      r->Assign(8, new Val(msg->qlen, TYPE_COUNT)); // reqlen
+	      r->Assign(9, new Val(msg->rlen, TYPE_COUNT)); // rsplen
+	      r->Assign(10, new Val(msg->opcode, TYPE_COUNT)); // opcode
+	      vl->append(r);
+	      mgr.Dispatch(new Event(dns_telemetry_detail_info, vl), true);
 	    }
+	    delete zone_hash;
 	  }
 
 	  if (do_counts) {
-	    ++CNTS.reply;
-	    ++TOTALS.reply;
 	    switch (msg->rcode) 
 	      {
-	      case DNS_CODE_OK:
+	      case DNS_CODE_OK: {
 		++CNTS.rcode_noerror;
+		++CNTS.reply;
+		++TOTALS.reply;
 		++TOTALS.rcode_noerror;
-		if (do_zone_stats)
+		if (do_zone_stats) {
 		  ++zv->NOERROR;
+		}
 		break;
+	      }
 	      case DNS_CODE_FORMAT_ERR:
 		++CNTS.rcode_format_err;
 		++TOTALS.rcode_format_err;
@@ -970,11 +984,6 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  }
 	}
 
-	if (msg->RD) {
-	  if (do_zone_stats)
-	    ++zv->RD;
-	}
-	
 	if ( dns_event && ! msg->skip_event )
 		{
 		BroString* question_name =
@@ -998,7 +1007,9 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start);
+	return 1;
+
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
 	if ( ! name_end )
 		return 0;
 
@@ -1017,12 +1028,15 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 	msg->aclass = ExtractShort(data, len);
 	msg->ttl = ExtractLong(data, len);
 
+	fprintf(stderr, " ttl=%d\n", msg->ttl);
+
 	int rdlength = ExtractShort(data, len);
 	if ( rdlength > len )
 		{
 		analyzer->Weird("DNS_truncated_RR_rdlength_lt_len");
 		return 0;
 		}
+
 
 	int status;
 	switch ( msg->atype ) {
@@ -1089,14 +1103,24 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 	return status;
 	}
 
+
 u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
 					u_char* name, int name_len,
-					const u_char* msg_start)
+					       const u_char* msg_start, char* key_host, char* key_zone, char* tlz)
 	{
 	u_char* name_start = name;
 
-	while ( ExtractLabel(data, len, name, name_len, msg_start) )
-		;
+	int label_cnt = 0;
+	int label_idx[64];
+
+	while (true) {
+	  int result = ExtractLabel(data, len, name, name_len, msg_start);
+	  if (!result) {
+	    break;
+	  } else {
+	    label_idx[label_cnt++] = result;
+	  }
+	} 
 
 	int n = name - name_start;
 
@@ -1109,6 +1133,59 @@ u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
 		--name;
 		name[0] = 0;
 		}
+
+	if (key_host) {
+	  int key_len = 0;
+	  int label_start = n;
+	  int label_processed = 0;
+	  int label_tlz = 0; // Need to calculate this based on # of labels for the suffix (.com, .co.uk, etc)
+	  int label_max_idx = label_cnt - 1;
+
+	  key_host[0] = 0;
+	  key_zone[0] = 0;
+	  tlz[0] = 0;
+	  int label_zones = 0;
+
+	  for (int i = label_max_idx; i >= 0; i--) {
+	    int label_len = label_idx[i];
+	    label_start -= (label_len+1);
+	    char label[64];
+	    memcpy(label, name_start+label_start, label_len);
+	    label[label_len] = 0;
+
+	    // If we've not yet figured out what the TLZ is, do so.
+	    if (label_tlz == 0) {
+	      if (i == label_max_idx) {
+		// TODO: build entire list of single-label suffixes for TLDs
+		if (strstr("comnetorginfo",label)) {
+		  label_tlz = 2;
+		}	
+	      } else if (i == label_max_idx-1) {
+		// TODO: build and check for two-label suffixes for TLDs
+	      }
+	    }
+
+	    // Build up the host key. It will contain only the labels (no periods).
+	    key_len += label_len;
+	    strcat(key_host,label);
+
+
+	    // Build up the zone key. It will contain only the labels (no periods).
+	    if (label_zones < label_tlz) {
+	      strcat(key_zone, label);
+	      label_zones++;
+	    }
+
+	  }
+
+	  // Determine how many chars to strip from the beginning of the qname to leave the remaining TLZ in original order
+	  int skip_chars = 0;
+	  for (int i = 0; i < label_cnt - label_tlz; i++) {
+	    skip_chars += (label_idx[i]+1);
+	  }
+	  strcpy(tlz, (char*)name_start+skip_chars);
+	  // fprintf(stderr, "::ExtractName qname=%s len=%d label_cnt=%d key_host=%s key_zone=%s tlz_labels=%d tlz=%s\n",name_start, n, label_cnt, key_host, key_zone, label_tlz,tlz);
+	}
 
 	// Convert labels to lower case for consistency.
 	for ( u_char* np = name_start; np < name; ++np )
@@ -1165,8 +1242,7 @@ int DNS_Telemetry_Interpreter::ExtractLabel(const u_char*& data, int& len,
 		const u_char* recurse_data = msg_start + offset;
 		int recurse_max_len = orig_data - recurse_data;
 
-		u_char* name_end = ExtractName(recurse_data, recurse_max_len,
-						name, name_len, msg_start);
+		u_char* name_end = ExtractName(recurse_data, recurse_max_len, name, name_len, msg_start, 0, 0, 0);
 
 		name_len -= name_end - name;
 		name = name_end;
@@ -1203,7 +1279,7 @@ int DNS_Telemetry_Interpreter::ExtractLabel(const u_char*& data, int& len,
 	data += label_len;
 	len -= label_len;
 
-	return 1;
+	return label_len;
 	}
 
 uint16 DNS_Telemetry_Interpreter::ExtractShort(const u_char*& data, int& len)
@@ -1253,7 +1329,7 @@ int DNS_Telemetry_Interpreter::ParseRR_Name(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
 	if ( ! name_end )
 		return 0;
 
@@ -1313,14 +1389,14 @@ int DNS_Telemetry_Interpreter::ParseRR_SOA(DNS_Telemetry_MsgInfo* msg,
 	u_char mname[513];
 	int mname_len = sizeof(mname) - 1;
 
-	u_char* mname_end = ExtractName(data, len, mname, mname_len, msg_start);
+	u_char* mname_end = ExtractName(data, len, mname, mname_len, msg_start, 0, 0, 0);
 	if ( ! mname_end )
 		return 0;
 
 	u_char rname[513];
 	int rname_len = sizeof(rname) - 1;
 
-	u_char* rname_end = ExtractName(data, len, rname, rname_len, msg_start);
+	u_char* rname_end = ExtractName(data, len, rname, rname_len, msg_start, 0, 0, 0);
 	if ( ! rname_end )
 		return 0;
 
@@ -1350,7 +1426,7 @@ int DNS_Telemetry_Interpreter::ParseRR_MX(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
 	if ( ! name_end )
 		return 0;
 
@@ -1382,7 +1458,7 @@ int DNS_Telemetry_Interpreter::ParseRR_SRV(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
 	if ( ! name_end )
 		return 0;
 	*name_end = 0;	// terminate name so we can use it in snprintf()
@@ -1438,9 +1514,7 @@ int DNS_Telemetry_Interpreter::ParseRR_TSIG(DNS_Telemetry_MsgInfo* msg,
 	const u_char* data_start = data;
 	u_char alg_name[1024];
 	int alg_name_len = sizeof(alg_name) - 1;
-
-	u_char* alg_name_end =
-		ExtractName(data, len, alg_name, alg_name_len, msg_start);
+	u_char* alg_name_end = ExtractName(data, len, alg_name, alg_name_len, msg_start, 0, 0, 0);
 
 	if ( ! alg_name_end )
 		return 0;
@@ -1823,45 +1897,6 @@ DNS_Telemetry_Analyzer::~DNS_Telemetry_Analyzer()
 
 void DNS_Telemetry_Analyzer::Init()
 	{
-	  /*
-	  c_request = c_rejected = c_reply = c_non_dns_request = 0;
-	  c_ANY_RD = 0;
-	  c_ANY = 0;
-	  c_A = 0;
-	  c_AAAA = 0;
-	  c_NS = 0;
-	  c_CNAME = 0;
-	  c_PTR = 0;
-	  c_SOA = 0;
-	  c_MX = 0;
-	  c_TXT = 0;
-	  c_SRV = 0;
-	  c_other = 0;
-
-	  c_TCP = 0;
-	  c_UDP = 0;
-	  c_TSIG = 0;
-	  c_EDNS = 0;
-	  c_RD = 0;
-	  c_DO = 0;
-	  c_CD = 0;
-	  c_V4 = 0;
-	  c_V6 = 0;
-
-	  c_OpQuery = 0;
-	  c_OpIQuery = 0;
-	  c_OpStatus = 0;
-	  c_OpNotify = 0;
-	  c_OpUpdate = 0;
-	  c_OpUnassigned = 0;
-
-	  c_rcode_noerror = 0;
-	  c_rcode_format_err = 0;
-	  c_rcode_server_fail = 0;
-	  c_rcode_nxdomain = 0;
-	  c_rcode_not_impl = 0;
-	  c_rcode_refused = 0;
-	  */
 	}
 
 void DNS_Telemetry_Analyzer::Done()

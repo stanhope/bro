@@ -71,13 +71,13 @@ global last_count_time:double = 0;
 global config_loaded:bool = F;
 global zones_loaded:bool = F;
 
-global path_log_details = "/var/log/dyn/dns/qps_telemetry/details";
-global path_log_zones = "/var/log/dyn/dns/qps_telemetry/zones";
-global path_log_hostnames = "/var/log/dyn/dns/qps_telemetry/hostnames";
-global path_log_clients = "/var/log/dyn/dns/ops_telemetry/clients";
-global path_log_counts = "/var/log/dyn/dns/ops_telemetry/counts";
-global path_log_anyrd = "/var/log/dyn/dns/ops_telemetry/anyrd";
-global path_log_pcaps = "/var/log/dyn/pcaps/trace";
+global path_log_details = "/var/log/dyn/em1/dns/qps_telemetry/details";
+global path_log_zones = "/var/log/dyn/em1/dns/qps_telemetry/zones";
+global path_log_hostnames = "/var/log/dyn/em1/dns/qps_telemetry/hostnames";
+global path_log_clients = "/var/log/dyn/em1/dns/ops_telemetry/clients";
+global path_log_counts = "/var/log/dyn/em1/dns/ops_telemetry/counts";
+global path_log_anyrd = "/var/log/dyn/em1/dns/ops_telemetry/anyrd";
+global path_log_pcaps = "/var/log/dyn/em1/pcaps/trace";
 
 global path_config_dbind = "/etc/dbind/bro_dbind.cfg";
 global path_config_zones = "/etc/dbind/bro_zones.cfg";
@@ -93,11 +93,11 @@ function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
   local ts:double = info$t;
   local rotating:bool = F;
   if (info$is_expire || info$start >= next_rotate) {
-    ts = next_rotate-1;
     rotating = T;
   }
   dns_telemetry_fire_counts(ts);
   if (rotating) {
+    ts = next_rotate-1;
     dns_telemetry_fire_anyrd(ts);
     dns_telemetry_fire_clients(ts);
     dns_telemetry_fire_zones(ts);
@@ -205,7 +205,7 @@ event Input::end_of_data(name: string, source: string)
 }
 
 event dns_telemetry_count(info:dns_telemetry_counts) {
-  print fmt("event.dns_telemetry_count %f,%d,%d,%d,%d",info$ts,info$request,info$rejected,info$reply,info$non_dns_request);
+  print fmt("event.dns_telemetry_count %s %f,%d,%d,%d,%d,%d",strftime("%H%M%S", double_to_time(info$ts)), info$ts,info$request,info$rejected,info$reply,info$non_dns_request,info$logged);
   Log::write_at(info$ts, DBIND9::COUNTS, info);
 }
 
@@ -235,6 +235,7 @@ event dns_telemetry_qname_info(info:dns_telemetry_qname_stats) {
 
 global detail_count:count = 0;
 event dns_telemetry_detail_info(info:dns_telemetry_detail) {
+#  print fmt("details %s", info);      
   Log::write_at(info$ts, DBIND9::DETAILS, info);
   ++detail_count;      
 }

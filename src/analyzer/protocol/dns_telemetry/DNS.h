@@ -132,6 +132,9 @@ public:
 	StringVal* query_name;
 	RR_Type atype;
 	int aclass;	///< normally = 1, inet
+	RR_Type qtype;
+	int qlen;
+	int rlen;
 	int ttl;
 
 	DNS_AnswerType answer_type;
@@ -161,19 +164,19 @@ protected:
 
 	int ParseQuestions(DNS_Telemetry_MsgInfo* msg,
 				const u_char*& data, int& len,
-				const u_char* start);
+			   const u_char* start, int is_query);
 	int ParseAnswers(DNS_Telemetry_MsgInfo* msg, int n, DNS_AnswerType answer_type,
 				const u_char*& data, int& len,
 				const u_char* start);
 
 	int ParseQuestion(DNS_Telemetry_MsgInfo* msg,
-			const u_char*& data, int& len, const u_char* start);
+			  const u_char*& data, int& len, const u_char* start, int is_query);
 	int ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 			const u_char*& data, int& len, const u_char* start);
 
 	u_char* ExtractName(const u_char*& data, int& len,
 				u_char* label, int label_len,
-				const u_char* msg_start);
+			    const u_char* msg_start, char* key_host, char* key_zone, char* tlz);
 	int ExtractLabel(const u_char*& data, int& len,
 			 u_char*& label, int& label_len,
 			 const u_char* msg_start);

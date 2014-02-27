@@ -133,8 +133,6 @@ public:
 	RR_Type atype;
 	int aclass;	///< normally = 1, inet
 	RR_Type qtype;
-	int qlen;
-	int rlen;
 	int ttl;
 
 	DNS_AnswerType answer_type;

@@ -3178,6 +3178,7 @@ type dns_telemetry_edns_additional: record {
 
 type dns_telemetry_counts: record {
  ts: double &log;
+ lag: double &log;
  request: count &log;
  rejected: count &log;
  reply: count &log;
@@ -3221,6 +3222,8 @@ type dns_telemetry_counts: record {
  rcode_REFUSED: count &log;
 
  logged: count &log;
+ qlen: count &log;
+ rlen: count &log;
 };
 
 type dns_telemetry_anyrd_stats: record {
@@ -3282,8 +3285,6 @@ type dns_telemetry_detail: record {
 # client: addr &log;
  server: string &log;
  client: string &log;
- qlen: count &log;
- rlen: count &log;
  opcode: count &log;
   
 };

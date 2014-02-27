@@ -71,12 +71,12 @@ global last_count_time:double = 0;
 global config_loaded:bool = F;
 global zones_loaded:bool = F;
 
-global path_log_details = "/var/log/dyn/em2/dns/qps_telemetry/details";
-global path_log_zones = "/var/log/dyn/em2/dns/qps_telemetry/zones";
-global path_log_hostnames = "/var/log/dyn/em2/dns/qps_telemetry/hostnames";
-global path_log_clients = "/var/log/dyn/em2/dns/ops_telemetry/clients";
-global path_log_counts = "/var/log/dyn/em2/dns/ops_telemetry/counts";
-global path_log_anyrd = "/var/log/dyn/em2/dns/ops_telemetry/anyrd";
+global path_log_details = "/var/log/dyn/em2/qps/details";
+global path_log_zones = "/var/log/dyn/em2/qps/zones";
+global path_log_hostnames = "/var/log/dyn/em2/qps/hostnames";
+global path_log_clients = "/var/log/dyn/em2/ops/clients";
+global path_log_counts = "/var/log/dyn/em2/ops/counts";
+global path_log_anyrd = "/var/log/dyn/em2/ops/anyrd";
 global path_log_pcaps = "/var/log/dyn/em2/pcaps/trace";
 
 global path_config_dbind = "/etc/dbind/bro_dbind.cfg";
@@ -204,8 +204,14 @@ event Input::end_of_data(name: string, source: string)
     }
 }
 
+global header_emit:bool = F;
+
 event dns_telemetry_count(info:dns_telemetry_counts) {
-  print fmt("event.dns_telemetry_count %s %f,%d,%d,%d,%d,%d",strftime("%H%M%S", double_to_time(info$ts)), info$ts,info$request,info$rejected,info$reply,info$non_dns_request,info$logged);
+      if (!header_emit) {
+  print "network_time lag - ts,request,reply,rejected,non_dns_request,logged";
+  header_emit = T;
+      }
+  print fmt("%s %f - %f,%d,%d,%d,%d,%d",strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$ts,info$request,info$reply,info$rejected,info$non_dns_request,info$logged);
   Log::write_at(info$ts, DBIND9::COUNTS, info);
 }
 
@@ -235,6 +241,7 @@ event dns_telemetry_qname_info(info:dns_telemetry_qname_stats) {
 
 global detail_count:count = 0;
 event dns_telemetry_detail_info(info:dns_telemetry_detail) {
+#  print fmt("details %s", info);      
   Log::write_at(info$ts, DBIND9::DETAILS, info);
   ++detail_count;      
 }

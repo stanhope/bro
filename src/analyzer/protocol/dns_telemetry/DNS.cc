@@ -352,14 +352,21 @@ void __dns_telemetry_details_zone_list() {
     }
 }
 
+double last_lag = 0;
+
 void __dns_telemetry_fire_counts(double ts) {
   if ( dns_telemetry_count )
     {
       val_list* vl = new val_list;
       RecordVal* r = new RecordVal(dns_telemetry_counts);
 
+      double lag = current_time() - ts;
+      if (lag > 1) {
+	fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
+      }
+
       r->Assign(0, new Val(ts, TYPE_DOUBLE));
-      r->Assign(1, new Val(current_time() - ts, TYPE_DOUBLE));
+      r->Assign(1, new Val(lag, TYPE_DOUBLE));
       r->Assign(2, new Val(CNTS.request, TYPE_COUNT));
       r->Assign(3, new Val(CNTS.rejected, TYPE_COUNT));
       r->Assign(4, new Val(CNTS.reply, TYPE_COUNT));
@@ -423,50 +430,59 @@ RecordVal*  __dns_telemetry_get_totals(double ts) {
   RecordVal* r = new RecordVal(dns_telemetry_counts);
 
   r->Assign(0, new Val(ts, TYPE_DOUBLE));
-  r->Assign(1, new Val(TOTALS.request, TYPE_COUNT));
-  r->Assign(2, new Val(TOTALS.rejected, TYPE_COUNT));
-  r->Assign(3, new Val(TOTALS.reply, TYPE_COUNT));
-  r->Assign(4, new Val(TOTALS.non_dns_request, TYPE_COUNT));
+  r->Assign(1, new Val(0, TYPE_DOUBLE));
+  r->Assign(2, new Val(TOTALS.request, TYPE_COUNT));
+  r->Assign(3, new Val(TOTALS.rejected, TYPE_COUNT));
+  r->Assign(4, new Val(TOTALS.reply, TYPE_COUNT));
+  r->Assign(5, new Val(TOTALS.non_dns_request, TYPE_COUNT));
 
-  r->Assign(5, new Val(TOTALS.ANY_RD, TYPE_COUNT));
+  r->Assign(6, new Val(TOTALS.ANY_RD, TYPE_COUNT));
 
-  r->Assign(6, new Val(TOTALS.ANY, TYPE_COUNT));
-  r->Assign(7, new Val(TOTALS.A, TYPE_COUNT));
-  r->Assign(8, new Val(TOTALS.AAAA, TYPE_COUNT));
-  r->Assign(9, new Val(TOTALS.NS, TYPE_COUNT));
-  r->Assign(10, new Val(TOTALS.CNAME, TYPE_COUNT));
+  r->Assign(7, new Val(TOTALS.ANY, TYPE_COUNT));
+  r->Assign(8, new Val(TOTALS.A, TYPE_COUNT));
+  r->Assign(9, new Val(TOTALS.AAAA, TYPE_COUNT));
+  r->Assign(10, new Val(TOTALS.NS, TYPE_COUNT));
+  r->Assign(11, new Val(TOTALS.CNAME, TYPE_COUNT));
 
-  r->Assign(11, new Val(TOTALS.PTR, TYPE_COUNT));
-  r->Assign(12, new Val(TOTALS.SOA, TYPE_COUNT));
-  r->Assign(13, new Val(TOTALS.MX, TYPE_COUNT));
-  r->Assign(14, new Val(TOTALS.TXT, TYPE_COUNT));
-  r->Assign(15, new Val(TOTALS.SRV, TYPE_COUNT));
-  r->Assign(16, new Val(TOTALS.other, TYPE_COUNT));
+  r->Assign(12, new Val(TOTALS.PTR, TYPE_COUNT));
+  r->Assign(13, new Val(TOTALS.SOA, TYPE_COUNT));
+  r->Assign(14, new Val(TOTALS.MX, TYPE_COUNT));
+  r->Assign(15, new Val(TOTALS.TXT, TYPE_COUNT));
+  r->Assign(16, new Val(TOTALS.SRV, TYPE_COUNT));
+  r->Assign(17, new Val(TOTALS.other, TYPE_COUNT));
 
-  r->Assign(17, new Val(TOTALS.TCP, TYPE_COUNT));
-  r->Assign(18, new Val(TOTALS.UDP, TYPE_COUNT));
-  r->Assign(19, new Val(TOTALS.TSIG, TYPE_COUNT));
-  r->Assign(20, new Val(TOTALS.EDNS, TYPE_COUNT));
-  r->Assign(21, new Val(TOTALS.RD, TYPE_COUNT));
-  r->Assign(22, new Val(TOTALS.DO, TYPE_COUNT));
-  r->Assign(23, new Val(TOTALS.CD, TYPE_COUNT));
-  r->Assign(24, new Val(TOTALS.V4, TYPE_COUNT));
-  r->Assign(25, new Val(TOTALS.V6, TYPE_COUNT));
+  r->Assign(18, new Val(TOTALS.TCP, TYPE_COUNT));
+  r->Assign(19, new Val(TOTALS.UDP, TYPE_COUNT));
+  r->Assign(20, new Val(TOTALS.TSIG, TYPE_COUNT));
+  r->Assign(21, new Val(TOTALS.EDNS, TYPE_COUNT));
+  r->Assign(22, new Val(TOTALS.RD, TYPE_COUNT));
+  r->Assign(23, new Val(TOTALS.DO, TYPE_COUNT));
+  r->Assign(24, new Val(TOTALS.CD, TYPE_COUNT));
+  r->Assign(25, new Val(TOTALS.V4, TYPE_COUNT));
+  r->Assign(26, new Val(TOTALS.V6, TYPE_COUNT));
 
-  r->Assign(26, new Val(TOTALS.OpQuery, TYPE_COUNT));
-  r->Assign(27, new Val(TOTALS.OpIQuery, TYPE_COUNT));
-  r->Assign(28, new Val(TOTALS.OpStatus, TYPE_COUNT));
-  r->Assign(29, new Val(TOTALS.OpNotify, TYPE_COUNT));
-  r->Assign(30, new Val(TOTALS.OpUpdate, TYPE_COUNT));
-  r->Assign(31, new Val(TOTALS.OpUnassigned, TYPE_COUNT));
+  r->Assign(27, new Val(TOTALS.OpQuery, TYPE_COUNT));
+  r->Assign(28, new Val(TOTALS.OpIQuery, TYPE_COUNT));
+  r->Assign(29, new Val(TOTALS.OpStatus, TYPE_COUNT));
+  r->Assign(30, new Val(TOTALS.OpNotify, TYPE_COUNT));
+  r->Assign(31, new Val(TOTALS.OpUpdate, TYPE_COUNT));
+  r->Assign(32, new Val(TOTALS.OpUnassigned, TYPE_COUNT));
 
-  r->Assign(32, new Val(TOTALS.rcode_noerror, TYPE_COUNT));
-  r->Assign(33, new Val(TOTALS.rcode_format_err, TYPE_COUNT));
-  r->Assign(34, new Val(TOTALS.rcode_server_fail, TYPE_COUNT));
-  r->Assign(35, new Val(TOTALS.rcode_nxdomain, TYPE_COUNT));
-  r->Assign(36, new Val(TOTALS.rcode_not_impl, TYPE_COUNT));
-  r->Assign(37, new Val(TOTALS.rcode_refused, TYPE_COUNT));
-  r->Assign(38, new Val(TOTALS.logged, TYPE_COUNT));
+  r->Assign(33, new Val(TOTALS.rcode_noerror, TYPE_COUNT));
+  r->Assign(34, new Val(TOTALS.rcode_format_err, TYPE_COUNT));
+  r->Assign(35, new Val(TOTALS.rcode_server_fail, TYPE_COUNT));
+  r->Assign(36, new Val(TOTALS.rcode_nxdomain, TYPE_COUNT));
+  r->Assign(37, new Val(TOTALS.rcode_not_impl, TYPE_COUNT));
+  r->Assign(38, new Val(TOTALS.rcode_refused, TYPE_COUNT));
+  r->Assign(39, new Val(TOTALS.logged, TYPE_COUNT));
+
+  // THIS ISN'T MEANINGFUL ... Just emitting so that we don't die 
+  uint qlen = CNTS.qlen ? CNTS.qlen / CNTS.request : 0;
+  uint rlen = CNTS.rlen ? CNTS.rlen / (CNTS.reply + CNTS.rejected) : 0;
+
+  r->Assign(40, new Val(qlen, TYPE_COUNT));
+  r->Assign(41, new Val(rlen, TYPE_COUNT));
+
   return r;
 }
 

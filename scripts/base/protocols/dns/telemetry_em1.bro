@@ -135,7 +135,7 @@ function init_manual_rotate(ts:time):double {
 # Track when the system does a rotation
 function custom_rotate(info: Log::RotationInfo) : bool
 {
-    print fmt("rotate_callback next=%f %s", next_rotate, info);
+#    print fmt("rotate_callback next=%f %s", next_rotate, info);
     return T;
 }
 
@@ -239,11 +239,9 @@ event dns_telemetry_qname_info(info:dns_telemetry_qname_stats) {
   Log::write_at(info$ts, DBIND9::QNAMES, info);
 }
 
-global detail_count:count = 0;
 event dns_telemetry_detail_info(info:dns_telemetry_detail) {
 #  print fmt("details %s", info);      
-  Log::write_at(info$ts, DBIND9::DETAILS, info);
-  ++detail_count;      
+#  Log::write_at(info$ts, DBIND9::DETAILS, info);
 }
 
 event bro_init()
@@ -272,8 +270,6 @@ event bro_init()
 
 event bro_done()
 {
-    print "";
     print fmt("bro_done clock=%f net=%f rotate=%f first=%f last=%f", current_time(), network_time(),next_rotate, time_network_first, time_network_last);
-    print fmt("  detail_count=%d", detail_count);
 }
 

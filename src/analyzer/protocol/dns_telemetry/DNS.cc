@@ -106,9 +106,6 @@ struct ZoneStats {
   uint REFUSED;
 };
 
-CurCounts CNTS;
-CurCounts TOTALS;
-
 bool do_counts = false;
 bool do_totals = false;
 bool do_zone_stats = true;
@@ -117,12 +114,16 @@ bool do_anyrd_stats = true;
 bool do_client_stats = true;
 bool do_details = true;
 
+int  DETAILS_WRITER_ID = 3;
+bool DETAILS_WRITE_VIA_EVENTS = false;
+
+CurCounts CNTS;
+CurCounts TOTALS;
+
 int logQueueSize = 0;
 char logQueue[100000] = "";
 
 // Used to use logging framework directly with no route BRO eventing framework.
-int WRITER_ID = 3;
-bool WRITE_VIA_EVENTS = false;
 
 DNS_Telemetry_Interpreter::DNS_Telemetry_Interpreter(analyzer::Analyzer* arg_analyzer)
 	{
@@ -960,7 +961,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
 	      sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,"","",msg->opcode);
 
-	      if (WRITE_VIA_EVENTS) {
+	      if (DETAILS_WRITE_VIA_EVENTS) {
 		uint len = strlen(log_line);
 		if (true || logQueueSize + len > sizeof(logQueue)) {
 		  StringVal* logentry = new StringVal(log_line);
@@ -977,7 +978,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	      } 
 	      else {
 		EnumType* writerType = new EnumType();
-		EnumVal* writerId = new EnumVal(WRITER_ID, writerType);
+		EnumVal* writerId = new EnumVal(DETAILS_WRITER_ID, writerType);
 		StringVal* val = new StringVal(log_line);
 		RecordVal* r = new RecordVal(dns_telemetry_detail);
 		r->Assign(0, val);

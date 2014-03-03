@@ -195,7 +195,7 @@ event Input::end_of_data(name: string, source: string)
 	dns_telemetry_set_do_clients(do_clients);
 	dns_telemetry_set_do_counts(do_counts);
 	dns_telemetry_set_do_totals(T);
-	dns_telemetry_set_do_details(do_details);
+	dns_telemetry_set_do_details(do_details, DBIND9::DETAILS, F);
     }
     if (zones_loaded && config_loaded) {
     
@@ -205,6 +205,35 @@ event Input::end_of_data(name: string, source: string)
 }
 
 global header_emit:bool = F;
+
+event bro_init()
+{
+   CreateLogStream(DBIND9::COUNTS, [$columns=dns_telemetry_counts], path_log_counts);
+   CreateLogStream(DBIND9::CLIENTS, [$columns=dns_telemetry_client_stats], path_log_clients);
+   CreateLogStream(DBIND9::ANYRD, [$columns=dns_telemetry_anyrd_stats], path_log_anyrd);
+   CreateLogStream(DBIND9::ZONES, [$columns=dns_telemetry_zone_stats], path_log_zones);
+   CreateLogStream(DBIND9::QNAMES, [$columns=dns_telemetry_qname_stats], path_log_hostnames);
+   CreateLogStream(DBIND9::DETAILS, [$columns=dns_telemetry_detail], path_log_details);
+
+    if (reading_live_traffic()) {
+        pkt_dumper_set(path_log_pcaps);
+        local delta:double = init_manual_rotate(current_time());
+	print fmt("BRO_INIT clock=%f net=%f reading_live=%d reading_traces=%d tracing=%d rotate_in=%f next_rotate=%f trace=%s", time_to_double(current_time()), time_to_double(network_time()), reading_live_traffic(), reading_traces(), do_pcaps, delta, next_rotate, path_log_pcaps);
+	   print fmt("  Telemetry Config: COUNTS=%d TOTALS=%d DETAILS=%d ANYRD=%d CLIENTS=%d ZONES=%d QNAMES=%d", dns_telemetry_get_do_counts(), dns_telemetry_get_do_totals(), dns_telemetry_get_do_details(), dns_telemetry_get_do_anyrd(), dns_telemetry_get_do_clients(), dns_telemetry_get_do_zones(), dns_telemetry_get_do_qnames());
+	Input::add_table([$source=path_config_dbind, $name=path_config_dbind, $idx=ConfigIdx, $val=ConfigRecord, $destination=config, $ev=config_change, $mode=Input::REREAD]);
+	Input::add_table([$source=path_config_zones, $name=path_config_zones, $idx=ZoneIdx, $destination=zones_to_log, $mode=Input::REREAD]);
+
+    } else {
+      do_pcaps = F;
+      if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts)
+	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS_TELEMETRY, dns_ports);
+    }
+}
+
+event bro_done()
+{
+    print fmt("bro_done clock=%f net=%f rotate=%f first=%f last=%f", current_time(), network_time(),next_rotate, time_network_first, time_network_last);
+}
 
 event dns_telemetry_count(info:dns_telemetry_counts) {
       if (!header_emit) {
@@ -242,34 +271,5 @@ event dns_telemetry_qname_info(info:dns_telemetry_qname_stats) {
 event dns_telemetry_detail_info(info:dns_telemetry_detail) {
 #  print fmt("details %s", info);      
   Log::write(DBIND9::DETAILS, info);
-}
-
-event bro_init()
-{
-   CreateLogStream(DBIND9::COUNTS, [$columns=dns_telemetry_counts], path_log_counts);
-   CreateLogStream(DBIND9::CLIENTS, [$columns=dns_telemetry_client_stats], path_log_clients);
-   CreateLogStream(DBIND9::ANYRD, [$columns=dns_telemetry_anyrd_stats], path_log_anyrd);
-   CreateLogStream(DBIND9::ZONES, [$columns=dns_telemetry_zone_stats], path_log_zones);
-   CreateLogStream(DBIND9::QNAMES, [$columns=dns_telemetry_qname_stats], path_log_hostnames);
-   CreateLogStream(DBIND9::DETAILS, [$columns=dns_telemetry_detail], path_log_details);
-
-    if (reading_live_traffic()) {
-        pkt_dumper_set(path_log_pcaps);
-        local delta:double = init_manual_rotate(current_time());
-	print fmt("BRO_INIT clock=%f net=%f reading_live=%d reading_traces=%d tracing=%d rotate_in=%f next_rotate=%f trace=%s", time_to_double(current_time()), time_to_double(network_time()), reading_live_traffic(), reading_traces(), do_pcaps, delta, next_rotate, path_log_pcaps);
-	   print fmt("  Telemetry Config: COUNTS=%d TOTALS=%d DETAILS=%d ANYRD=%d CLIENTS=%d ZONES=%d QNAMES=%d", dns_telemetry_get_do_counts(), dns_telemetry_get_do_totals(), dns_telemetry_get_do_details(), dns_telemetry_get_do_anyrd(), dns_telemetry_get_do_clients(), dns_telemetry_get_do_zones(), dns_telemetry_get_do_qnames());
-	Input::add_table([$source=path_config_dbind, $name=path_config_dbind, $idx=ConfigIdx, $val=ConfigRecord, $destination=config, $ev=config_change, $mode=Input::REREAD]);
-	Input::add_table([$source=path_config_zones, $name=path_config_zones, $idx=ZoneIdx, $destination=zones_to_log, $mode=Input::REREAD]);
-
-    } else {
-      do_pcaps = F;
-      if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts)
-	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS_TELEMETRY, dns_ports);
-    }
-}
-
-event bro_done()
-{
-    print fmt("bro_done clock=%f net=%f rotate=%f first=%f last=%f", current_time(), network_time(),next_rotate, time_network_first, time_network_last);
 }
 

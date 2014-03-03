@@ -46,6 +46,7 @@ private:
 	bool output_to_stdout;
 	bool include_meta;
 	bool tsv;
+	bool escape;
 
 	string separator;
 	string set_separator;

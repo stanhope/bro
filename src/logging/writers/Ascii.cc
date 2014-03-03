@@ -20,6 +20,7 @@ Ascii::Ascii(WriterFrontend* frontend) : WriterBackend(frontend)
 	fd = 0;
 	ascii_done = false;
 	tsv = false;
+	escape = true;
 
 	output_to_stdout = BifConst::LogAscii::output_to_stdout;
 	include_meta = BifConst::LogAscii::include_meta;
@@ -49,7 +50,6 @@ Ascii::Ascii(WriterFrontend* frontend) : WriterBackend(frontend)
 			BifConst::LogAscii::meta_prefix->Len()
 			);
 
-	desc.EnableEscaping();
 	desc.AddEscapeSequence(separator);
 
 	ascii = new AsciiFormatter(this, AsciiFormatter::SeparatorInfo(set_separator, unset_field, empty_field));
@@ -122,7 +122,23 @@ bool Ascii::DoInit(const WriterInfo& info, int num_fields, const Field* const * 
 				return false;
 				}
 			}
+		else if ( strcmp(i->first, "escape") == 0 )
+			{
+			if ( strcmp(i->second, "T") == 0 )
+				escape = true;
+
+			else if ( strcmp(i->second, "F") == 0 )
+				escape = false;
+			else
+				{
+				Error("invalid value for 'escape', must be a string and either \"T\" or \"F\"");
+				return false;
+				}
+			}
 		}
+
+	if (escape)
+	  desc.EnableEscaping();
 
 	if ( include_meta )
 		{
@@ -223,6 +239,7 @@ bool Ascii::DoWrite(int num_fields, const Field* const * fields,
 	const char* bytes = (const char*)desc.Bytes();
 	int len = desc.Len();
 
+	/*
 	if ( strncmp(bytes, meta_prefix.data(), meta_prefix.size()) == 0 )
 		{
 		// It would so escape the first character.
@@ -235,6 +252,7 @@ bool Ascii::DoWrite(int num_fields, const Field* const * fields,
 		++bytes;
 		--len;
 		}
+	*/
 
 	if ( ! safe_write(fd, bytes, len) )
 		goto write_error;

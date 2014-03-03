@@ -15,6 +15,7 @@
 #include "Dict.h"
 
 #include "events.bif.h"
+#include "logging/Manager.h"
 
 using namespace analyzer::dns_telemetry;
 
@@ -59,6 +60,9 @@ struct CurCounts {
   uint logged;
   uint qlen;
   uint rlen;
+  uint clients;
+  uint zones;
+  uint MBsec;
 };
 
 struct AnyRDCounts {
@@ -112,6 +116,13 @@ bool do_qname_stats = true;
 bool do_anyrd_stats = true;
 bool do_client_stats = true;
 bool do_details = true;
+
+int logQueueSize = 0;
+char logQueue[100000] = "";
+
+// Used to use logging framework directly with no route BRO eventing framework.
+int WRITER_ID = 3;
+bool WRITE_VIA_EVENTS = false;
 
 DNS_Telemetry_Interpreter::DNS_Telemetry_Interpreter(analyzer::Analyzer* arg_analyzer)
 	{
@@ -419,6 +430,10 @@ void __dns_telemetry_fire_counts(double ts) {
       r->Assign(40, new Val(qlen, TYPE_COUNT));
       r->Assign(41, new Val(rlen, TYPE_COUNT));
 
+      r->Assign(42, new Val(CNTS.clients, TYPE_COUNT));
+      r->Assign(43, new Val(CNTS.zones, TYPE_COUNT));
+      r->Assign(44, new Val((CNTS.qlen + CNTS.rlen)/1048576, TYPE_COUNT));
+
       vl->append(r);
       mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
     }
@@ -483,6 +498,11 @@ RecordVal*  __dns_telemetry_get_totals(double ts) {
   r->Assign(40, new Val(qlen, TYPE_COUNT));
   r->Assign(41, new Val(rlen, TYPE_COUNT));
 
+  r->Assign(42, new Val(TOTALS.clients, TYPE_COUNT));
+  r->Assign(43, new Val(TOTALS.zones, TYPE_COUNT));
+  // NOT MEANINGFUL ... new total time and to keep track of total rlen/qlen
+  r->Assign(44, new Val(0, TYPE_COUNT));
+  
   return r;
 }
 
@@ -737,6 +757,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	    zv->cnt = 0;
 	    strcpy(zv->key, tlz);
 	    telemetry_zone_stats.Insert(zone_hash, zv);
+	    ++CNTS.zones;
+	    ++TOTALS.zones;
 	  }
 	  delete zone_hash;
 	  
@@ -784,6 +806,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	      ++(*client_idx);
 	    } else {
 	      telemetry_client_stats.Insert(client_hash, new int(1));
+	      ++CNTS.clients;
+	      ++TOTALS.zones;
 	    }
 	    delete client_hash;
 	  }
@@ -924,36 +948,42 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
 	    HashKey* zone_hash = new HashKey(tlz);
 	    if (zone_table.Lookup(zone_hash)) {
+
 	      ++CNTS.logged;
 	      ++TOTALS.logged;
 
 	      const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
 	      const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
-	      char client_key[50];
-	      strcpy(client_key, orig_addr.AsString().c_str()); 
 
-	      // TODO: FIX THIS. Can't know until we shift this to RESPONSE processing.
-	      // Which also means that we can't know the RCODE.
-	      // Which also means that we need to maintain state in the analyzer (default DNS from BRO does this in .bro scriptland)
+	      char log_line[256];
+	      // sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u\n", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,resp_addr.AsString().c_str(),orig_addr.AsString().c_str(),msg->opcode);
 
-	      char server_key[50];
-	      strcpy(server_key, resp_addr.AsString().c_str()); 
+	      sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,"","",msg->opcode);
 
-	      // fprintf(stderr, "LOG %f %s qtype=%d rcode=%d\n", network_time, name, msg->qtype,msg->rcod);
-
-	      val_list* vl = new val_list;
-	      RecordVal* r = new RecordVal(dns_telemetry_detail);
-	      r->Assign(0, new Val(network_time, TYPE_DOUBLE));
-	      r->Assign(1, new StringVal((char*)name));
-	      r->Assign(2, new Val(msg->qtype, TYPE_COUNT));// RRType
-	      r->Assign(3, new Val(msg->rcode, TYPE_COUNT)); // rcode
-	      r->Assign(4, new Val(0, TYPE_COUNT)); // edns bufsize
-	      r->Assign(5, new Val(msg->ttl, TYPE_COUNT)); // ttl
-	      r->Assign(6, new StringVal(server_key)); // server
-	      r->Assign(7, new StringVal(client_key)); // client
-	      r->Assign(8, new Val(msg->opcode, TYPE_COUNT)); // opcode
-	      vl->append(r);
-	      mgr.Dispatch(new Event(dns_telemetry_detail_info, vl), true);
+	      if (WRITE_VIA_EVENTS) {
+		uint len = strlen(log_line);
+		if (true || logQueueSize + len > sizeof(logQueue)) {
+		  StringVal* logentry = new StringVal(log_line);
+		  val_list* vl = new val_list;
+		  RecordVal* r = new RecordVal(dns_telemetry_detail);
+		  r->Assign(0, logentry);
+		  vl->append(r);
+		  mgr.Dispatch(new Event(dns_telemetry_detail_info, vl), true);
+		  logQueue[0] = 0;
+		  logQueueSize = 0;
+		}
+		memcpy(logQueue+logQueueSize, log_line, len);
+		logQueueSize += len;
+	      } 
+	      else {
+		EnumType* writerType = new EnumType();
+		EnumVal* writerId = new EnumVal(WRITER_ID, writerType);
+		StringVal* val = new StringVal(log_line);
+		RecordVal* r = new RecordVal(dns_telemetry_detail);
+		r->Assign(0, val);
+		log_mgr->WriteAt(network_time, writerId->AsEnumVal(), r);
+		Unref(r);
+	      }
 	    }
 	    delete zone_hash;
 	  }

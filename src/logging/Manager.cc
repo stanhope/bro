@@ -728,6 +728,8 @@ bool Manager::WriteAt(double t, EnumVal* id, RecordVal* columns)
 	if ( ! stream->enabled )
 		return true;
 
+	// if (id->CoerceToUnsigned() == 3) fprintf(stderr, "WriteAt logid=%lu %f\n", id->CoerceToUnsigned(), t);
+
 	columns = columns->CoerceTo(stream->columns);
 
 	if ( ! columns )

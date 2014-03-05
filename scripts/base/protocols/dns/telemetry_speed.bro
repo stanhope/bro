@@ -102,6 +102,7 @@ function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
     dns_telemetry_fire_clients(ts);
     dns_telemetry_fire_zones(ts);
     dns_telemetry_fire_qnames(ts);
+    dns_telemetry_fire_details(ts, info$is_expire);
     if (do_pcaps) {
       local open_time:time = pkt_dumper_open(path_log_pcaps);
       local new_name:string = fmt("%s.%s-%06f", path_log_pcaps, open_time, network_time());
@@ -195,7 +196,7 @@ event Input::end_of_data(name: string, source: string)
 	dns_telemetry_set_do_clients(do_clients);
 	dns_telemetry_set_do_counts(do_counts);
 	dns_telemetry_set_do_totals(T);
-	dns_telemetry_set_do_details(do_details, DBIND9::DETAILS, F);
+	dns_telemetry_set_do_details(do_details, DBIND9::DETAILS, F, path_log_details);
     }
     if (zones_loaded && config_loaded) {
     
@@ -237,10 +238,10 @@ event bro_done()
 
 event dns_telemetry_count(info:dns_telemetry_counts) {
       if (!header_emit) {
-  print "network_time lag - ts,request,reply,rejected,non_dns_request,logged,clients,zones,MBsec";
+  print "network_time lag - ts,request,reply,rejected,non_dns_request,logged,clients,zones,MBsec,MBin,MBout,MBsec";
   header_emit = T;
       }
-  print fmt("%s %f - %f,%d,%d,%d,%d,%d,%d,%d,%d",strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$ts,info$request,info$reply,info$rejected,info$non_dns_request,info$logged,info$clients,info$zones,info$MBsec);
+  print fmt("%s %f - %f,%d,%d,%d,%d,%d,%d,%d,%05.2f,%05.2f,%05.2f",strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$ts,info$request,info$reply,info$rejected,info$non_dns_request,info$logged,info$clients,info$zones,info$MBin,info$MBout,info$MBsec);
   Log::write_at(info$ts, DBIND9::COUNTS, info);
 }
 

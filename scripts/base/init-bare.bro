@@ -3227,7 +3227,10 @@ type dns_telemetry_counts: record {
  
  clients: count &log;
  zones: count &log;
- MBsec: count &log;
+
+ MBin: double &log;
+ MBout: double &log;
+ MBsec: double &log;
 
 };
 

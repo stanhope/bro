@@ -146,6 +146,7 @@ extern bool do_totals;
 extern bool do_details;
 extern bool DETAILS_WRITE_VIA_EVENTS;
 extern int DETAILS_WRITER_ID;
+extern void set_do_details(bool, int, bool, const char*);
 
 extern void __dns_telemetry_fire_counts(double ts);
 extern void __dns_telemetry_fire_totals(double ts);
@@ -153,6 +154,7 @@ extern void __dns_telemetry_fire_anyrd(double ts);
 extern void __dns_telemetry_fire_clients(double ts);
 extern void __dns_telemetry_fire_zones(double ts);
 extern void __dns_telemetry_fire_qnames(double ts);
+extern void __dns_telemetry_fire_details(double ts, bool terminating);
 
 extern void __dns_telemetry_details_add_zone(StringVal* zone);
 extern void __dns_telemetry_details_zone_list();
@@ -207,6 +209,12 @@ function dns_telemetry_fire_qnames%(ts:double%):any
 	return 0;
 %}
 
+function dns_telemetry_fire_details%(ts:double, terminating:bool%):any
+%{
+	if (do_details) __dns_telemetry_fire_details(ts, terminating);
+	return 0;
+%}
+
 function dns_telemetry_get_do_counts%(%): bool
 %{
 	return new Val(do_counts, TYPE_BOOL);
@@ -250,14 +258,10 @@ function dns_telemetry_set_do_counts%(enable:bool%): any
 
 # Sure, a little ugly. But it accomplishes what I need. 
 # See analyzers/protocols/dns_telemetry/DNS.cc for what this is about.
-function dns_telemetry_set_do_details%(enable:bool, id: Log::ID, write_via_events:bool%): any
+function dns_telemetry_set_do_details%(enable:bool, id: Log::ID, write_via_events:bool, fname:string%): any
 %{
-	do_details = enable;
-	EnumVal* val = id->AsEnumVal();
-	int logid = val->CoerceToInt();
-	DETAILS_WRITER_ID = logid;
-	DETAILS_WRITE_VIA_EVENTS = write_via_events;
-	fprintf(stderr, "set_do_details enable=%d logid=%d events=%d\n", do_details, logid, write_via_events);
+	int logid = id->AsEnumVal()->CoerceToInt();
+	set_do_details(enable, logid, write_via_events, fname->CheckString());
 	return 0;
 %}
 

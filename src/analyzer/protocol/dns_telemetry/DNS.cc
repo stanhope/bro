@@ -13,6 +13,7 @@
 #include "Event.h"
 #include "Hash.h"
 #include "Dict.h"
+#include "File.h"
 
 #include "events.bif.h"
 #include "logging/Manager.h"
@@ -116,6 +117,16 @@ bool do_details = true;
 
 int  DETAILS_WRITER_ID = 3;
 bool DETAILS_WRITE_VIA_EVENTS = false;
+char DETAILS_FILE_NAME[256]; // = "/var/log/dyn/qps/details.log";
+BroFile* DETAILS_FILE = NULL;
+
+void set_do_details(bool enable, int logid, bool via_events, const char* fname) {
+  DETAILS_WRITE_VIA_EVENTS = via_events;
+  DETAILS_WRITER_ID = logid;
+  strcpy(DETAILS_FILE_NAME, fname);
+  do_details = enable;
+  fprintf(stderr, "set_do_details enable=%d logid=%d events=%d fname=%s\n", do_details, logid, via_events, DETAILS_FILE_NAME);
+}
 
 CurCounts CNTS;
 CurCounts TOTALS;
@@ -147,6 +158,8 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 	  if (is_query) {
 
 	    CNTS.qlen += len;
+	    TOTALS.qlen += len;
+
 	    if (analyzer->Conn()->ConnTransport() == TRANSPORT_TCP) {
 	      ++CNTS.TCP;
 	      ++TOTALS.TCP;
@@ -197,6 +210,7 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 	    }
 	  } else {
 	    CNTS.rlen += len;
+	    TOTALS.rlen += len;
 	  }
 
 	}
@@ -373,7 +387,7 @@ void __dns_telemetry_fire_counts(double ts) {
       RecordVal* r = new RecordVal(dns_telemetry_counts);
 
       double lag = current_time() - ts;
-      if (lag > 1) {
+      if (lag > 2) {
 	fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
       }
 
@@ -433,7 +447,9 @@ void __dns_telemetry_fire_counts(double ts) {
 
       r->Assign(42, new Val(CNTS.clients, TYPE_COUNT));
       r->Assign(43, new Val(CNTS.zones, TYPE_COUNT));
-      r->Assign(44, new Val((CNTS.qlen + CNTS.rlen)/1048576, TYPE_COUNT));
+      r->Assign(44, new Val(CNTS.qlen/1048576.0, TYPE_DOUBLE));
+      r->Assign(45, new Val(CNTS.rlen/1048576.0, TYPE_DOUBLE));
+      r->Assign(46, new Val((CNTS.qlen+CNTS.rlen)/1048576.0, TYPE_DOUBLE));
 
       vl->append(r);
       mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
@@ -502,8 +518,10 @@ RecordVal*  __dns_telemetry_get_totals(double ts) {
   r->Assign(42, new Val(TOTALS.clients, TYPE_COUNT));
   r->Assign(43, new Val(TOTALS.zones, TYPE_COUNT));
   // NOT MEANINGFUL ... new total time and to keep track of total rlen/qlen
-  r->Assign(44, new Val(0, TYPE_COUNT));
-  
+  r->Assign(44, new Val(TOTALS.qlen/1048576.0, TYPE_DOUBLE));
+  r->Assign(45, new Val(TOTALS.rlen/1048576.0, TYPE_DOUBLE));
+  r->Assign(46, new Val((TOTALS.qlen+TOTALS.rlen)/1048576.0, TYPE_DOUBLE));
+
   return r;
 }
 
@@ -587,6 +605,35 @@ void __dns_telemetry_fire_clients(double ts) {
       }
     }
   telemetry_client_stats.Clear();
+}
+
+void __dns_telemetry_fire_details(double ts, bool terminating) {
+
+  // How we deal with synchronous, manual rotation.
+  // Special case for high-perf writing scenarios (> 250K QPS)
+  static char buf[256];
+  static char rotate_fname[256];
+  static char source_fname[256];
+  time_t time = (time_t) ts-59;; // ugly. We're getting called @ the 59'th
+  strftime(buf, sizeof(buf), "%y-%m-%d_%H.%M.%S.log", localtime(&time));
+  sprintf(source_fname, "%s.log", DETAILS_FILE_NAME);
+  sprintf(rotate_fname, "%s-%s", DETAILS_FILE_NAME, buf);
+
+  if (DETAILS_FILE != NULL) {
+    DETAILS_FILE->Flush();
+    DETAILS_FILE->Close();
+    rotate_file_to_name(source_fname, rotate_fname, 0);
+  } else {
+    FILE* f = fopen(rotate_fname, "wb");
+    fclose(f);
+  }
+
+  if (!terminating) {
+    if (DETAILS_FILE) delete DETAILS_FILE;
+    DETAILS_FILE = new BroFile(fopen(source_fname, "wb"));
+  } else {
+    unlink(source_fname);
+  }
 }
 
 void __dns_telemetry_fire_zones(double ts) {
@@ -957,12 +1004,9 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	      const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
 
 	      char log_line[256];
-	      // sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u\n", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,resp_addr.AsString().c_str(),orig_addr.AsString().c_str(),msg->opcode);
-
 	      sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,"","",msg->opcode);
-
+	      uint len = strlen(log_line);
 	      if (DETAILS_WRITE_VIA_EVENTS) {
-		uint len = strlen(log_line);
 		if (true || logQueueSize + len > sizeof(logQueue)) {
 		  StringVal* logentry = new StringVal(log_line);
 		  val_list* vl = new val_list;
@@ -977,6 +1021,15 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 		logQueueSize += len;
 	      } 
 	      else {
+		log_line[len++] = '\n';
+		log_line[len] = 0;
+		if (DETAILS_FILE == NULL) {
+		  static char source_fname[256];
+		  sprintf(source_fname, "%s.log", DETAILS_FILE_NAME);
+		  DETAILS_FILE = new BroFile(fopen(source_fname, "wb"));
+		}
+		DETAILS_FILE->Write(log_line, len);
+		/*
 		EnumType* writerType = new EnumType();
 		EnumVal* writerId = new EnumVal(DETAILS_WRITER_ID, writerType);
 		StringVal* val = new StringVal(log_line);
@@ -984,6 +1037,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 		r->Assign(0, val);
 		log_mgr->WriteAt(network_time, writerId->AsEnumVal(), r);
 		Unref(r);
+		*/
 	      }
 	    }
 	    delete zone_hash;

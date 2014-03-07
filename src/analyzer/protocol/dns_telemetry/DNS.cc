@@ -148,7 +148,12 @@ struct LogInfo {
   BroFile* file;
 };
 
-LogInfo LOGGERS[10];
+struct LoggerInfo {
+  LogInfo* loggers[100000];
+  uint size = 0;
+};
+
+LoggerInfo LOGGER_INFO;
 
 declare(PDict,int);
 declare(PDict,QnameStats);
@@ -184,13 +189,21 @@ void set_do_details(bool enable, int logid, bool via_events, const char* fname) 
   // strcpy(DETAILS_FILE_NAME, fname);
   do_details = enable;
 
-  LOGGERS[0].fname = (char*)malloc(256);
-  strcpy(LOGGERS[0].fname, fname);
-  LOGGERS[0].owner_id = 0;
-  LOGGERS[0].file = 0;
-  LOGGERS[0].ts = network_time;
+  LogInfo* logger;
+  if (LOGGER_INFO.size == 0) {
+    logger = new LogInfo();
+    LOGGER_INFO.loggers[0] = logger;
+    ++LOGGER_INFO.size;
+  } else {
+    logger = LOGGER_INFO.loggers[0];
+  }
 
-  fprintf(stderr, "LOGGERS[0].fname=%s owner_id=%d file=%p ts=%f\n", LOGGERS[0].fname, LOGGERS[0].owner_id, LOGGERS[0].file, LOGGERS[0].ts);
+  logger->fname = (char*)malloc(256);
+  strcpy(logger->fname, fname);
+  logger->owner_id = 0;
+  logger->file = NULL;
+  logger->ts = network_time;
+
   fprintf(stderr, "set_do_details enable=%d logid=%d events=%d fname=%s\n", do_details, logid, via_events, fname);
 }
 
@@ -673,32 +686,33 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
   time_t time = (time_t) ts-59;; // ugly. We're getting called @ the 59'th
   strftime(buf, sizeof(buf), "%y-%m-%d_%H.%M.%S", localtime(&time));
 
-  fprintf(stderr, "TODO: Rotate all open loggers, rotating logger 0 for now\n");
+  for (uint i = 0; i < LOGGER_INFO.size; i++) {
+    LogInfo* logger = LOGGER_INFO.loggers[i];
 
-  LogInfo* logger = &LOGGERS[0];
+    char* root_fname = logger->fname;
+    sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
+    sprintf(rotate_fname, "%s-%08d-%s.log", root_fname, logger->owner_id, buf);
 
-  char* root_fname = logger->fname;
-  sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
-  sprintf(rotate_fname, "%s-%08d-%s.log", root_fname, logger->owner_id, buf);
+    // fprintf(stderr, "Rotating %s => %s\n", source_fname, rotate_fname);
+    
+    if (logger->file != 0) {
+      logger->file->Flush();
+      logger->file->Close();
+      rotate_file_to_name(source_fname, rotate_fname, 0);
+    } else {
+      // fprintf(stderr, "Creating empty details for for %s\n", rotate_fname);
+      FILE* f = fopen(rotate_fname, "wb");
+      fclose(f);
+    }
 
-  fprintf(stderr, "Rotating %s => %s\n", source_fname, rotate_fname);
-
-  if (logger->file != 0) {
-    logger->file->Flush();
-    logger->file->Close();
-    rotate_file_to_name(source_fname, rotate_fname, 0);
-  } else {
-    fprintf(stderr, "Creating empty details for for %s\n", rotate_fname);
-    FILE* f = fopen(rotate_fname, "wb");
-    fclose(f);
+    if (!terminating) {
+      if (logger->file != NULL) delete logger->file;
+      logger->file = new BroFile(fopen(source_fname, "wb"));
+    } else {
+      unlink(source_fname);
+    }
   }
 
-  if (!terminating) {
-    if (logger->file != NULL) delete logger->file;
-    logger->file = new BroFile(fopen(source_fname, "wb"));
-  } else {
-    unlink(source_fname);
-  }
 }
 
 void __dns_telemetry_fire_owners(double ts) {
@@ -936,7 +950,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 		owner_stats->cnt = 0;
 		OWNER_INFO.owners[0] = owner_stats;
 		OWNER_INFO.size++;
-		fprintf(stderr, "Used slot %d for owner_id=%d (OTHER)\n", OWNER_INFO.size, 0);
+		// fprintf(stderr, "Used slot %d for owner_id=%d (OTHER)\n", OWNER_INFO.size, 0);
 	      }
 	      ++owner_stats->cnt;
 
@@ -959,7 +973,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 		owner_stats->cnt = 0;
 		OWNER_INFO.owners[zinfo->owner_id] = owner_stats;
 		OWNER_INFO.size++;
-		fprintf(stderr, "Used slot %d for owner_id=%d (%s)\n", OWNER_INFO.size, zinfo->owner_id, zinfo->key);
+		// fprintf(stderr, "Used slot %d for owner_id=%d (%s)\n", OWNER_INFO.size, zinfo->owner_id, zinfo->key);
 	      }
 	      ++owner_stats->cnt;
 	    }
@@ -1181,8 +1195,34 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	    uint len = strlen(log_line);
 	    log_line[len++] = '\n';
 	    log_line[len] = 0;
-	    LogInfo* logger = &LOGGERS[0];
 
+	    // Determine which logger we should use
+	    LogInfo* logger = 0;
+	    if (zinfo->log_id != 0) {
+	      for (uint i = 0; i < LOGGER_INFO.size; i++) {
+		LogInfo* _logger = LOGGER_INFO.loggers[i];
+		if (_logger->owner_id == zinfo->log_id) {
+		  logger = _logger;
+		  break;
+		}
+	      }
+	      if (logger == 0) {
+		// Create new logger
+		logger = new LogInfo();
+		logger->owner_id = zinfo->log_id;
+		logger->ts = network_time;
+		// Use the base multi-tenant logger's root
+		logger->fname = LOGGER_INFO.loggers[0]->fname;
+		// Remember that we created this one.
+		LOGGER_INFO.loggers[LOGGER_INFO.size++] = logger;
+	      }
+	    }
+
+	    if (logger == NULL) {
+	      // Default to multi-tenant logger
+	      logger = LOGGER_INFO.loggers[0];
+	    }
+	    
 	    if (logger->file == NULL) {
 	      static char source_fname[256];
 	      static char* root_fname = logger->fname;

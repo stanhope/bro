@@ -132,44 +132,46 @@ event dns_telemetry_totals%(info:dns_telemetry_counts%);
 event dns_telemetry_anyrd_info%(info:dns_telemetry_anyrd_stats%);
 event dns_telemetry_client_info%(info:dns_telemetry_client_stats%);
 event dns_telemetry_zone_info%(info:dns_telemetry_zone_stats%);
+event dns_telemetry_owner_info%(info:dns_telemetry_owner_stats%);
 event dns_telemetry_qname_info%(info:dns_telemetry_qname_stats%);
 event dns_telemetry_detail_info%(info:dns_telemetry_detail%);
 
 %%{
 
 extern bool do_zone_stats;
+extern bool do_owner_stats;
 extern bool do_qname_stats;
 extern bool do_anyrd_stats;
 extern bool do_client_stats;
 extern bool do_counts;
 extern bool do_totals;
 extern bool do_details;
-extern bool DETAILS_WRITE_VIA_EVENTS;
-extern int DETAILS_WRITER_ID;
-extern void set_do_details(bool, int, bool, const char*);
+
+extern void set_index_type(uint);
+extern void set_do_details(bool enable, int logid, bool via_events, const char* fname);
 
 extern void __dns_telemetry_fire_counts(double ts);
 extern void __dns_telemetry_fire_totals(double ts);
 extern void __dns_telemetry_fire_anyrd(double ts);
 extern void __dns_telemetry_fire_clients(double ts);
 extern void __dns_telemetry_fire_zones(double ts);
+extern void __dns_telemetry_fire_owners(double ts);
 extern void __dns_telemetry_fire_qnames(double ts);
 extern void __dns_telemetry_fire_details(double ts, bool terminating);
-
-extern void __dns_telemetry_details_add_zone(StringVal* zone);
-extern void __dns_telemetry_details_zone_list();
+extern void __dns_telemetry_zone_info_add(StringVal* name, int zoneid, int custid, int logid, int statid);
+extern void __dns_telemetry_zone_info_list();
 
 %%}
 
-function dns_telemetry_details_add_zone%(tlz:string%):any
+function dns_telemetry_zone_info_add%(name:string, zoneid:int, custid:int, logid:int, statid:int%):any
 %{
-	__dns_telemetry_details_add_zone(tlz);
+	__dns_telemetry_zone_info_add(name, zoneid, custid, logid, statid);
 	return 0;
 %}
 
-function dns_telemetry_details_zone_list%(%):any
+function dns_telemetry_zone_info_list%(%):any
 %{
-	__dns_telemetry_details_zone_list();
+	__dns_telemetry_zone_info_list();
 	return 0;
 %}
 
@@ -200,6 +202,12 @@ function dns_telemetry_fire_clients%(ts:double%):any
 function dns_telemetry_fire_zones%(ts:double%):any
 %{
 	if (do_zone_stats) __dns_telemetry_fire_zones(ts);
+	return 0;
+%}
+
+function dns_telemetry_fire_owners%(ts:double%):any
+%{
+	if (do_zone_stats) __dns_telemetry_fire_owners(ts);
 	return 0;
 %}
 
@@ -256,6 +264,12 @@ function dns_telemetry_set_do_counts%(enable:bool%): any
 	return 0;
 %}
 
+function dns_telemetry_set_index_type%(map_t:count%): any
+%{
+	set_index_type(map_t);
+	return 0;
+%}
+
 # Sure, a little ugly. But it accomplishes what I need. 
 # See analyzers/protocols/dns_telemetry/DNS.cc for what this is about.
 function dns_telemetry_set_do_details%(enable:bool, id: Log::ID, write_via_events:bool, fname:string%): any
@@ -274,6 +288,12 @@ function dns_telemetry_set_do_totals%(enable:bool%): any
 function dns_telemetry_set_do_zones%(enable:bool%): any
 %{
 	do_zone_stats = enable;
+	return 0;
+%}
+
+function dns_telemetry_set_do_owners%(enable:bool%): any
+%{
+	do_owner_stats = enable;
 	return 0;
 %}
 

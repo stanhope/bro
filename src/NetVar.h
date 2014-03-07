@@ -134,6 +134,7 @@ extern RecordType* dns_telemetry_counts;
 extern RecordType* dns_telemetry_anyrd_stats;
 extern RecordType* dns_telemetry_client_stats;
 extern RecordType* dns_telemetry_zone_stats;
+extern RecordType* dns_telemetry_owner_stats;
 extern RecordType* dns_telemetry_qname_stats;
 extern RecordType* dns_telemetry_detail;
 

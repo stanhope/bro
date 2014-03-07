@@ -3247,9 +3247,17 @@ type dns_telemetry_client_stats: record {
  cnt: count &log;
  };
 
+type dns_telemetry_owner_stats: record {
+     ts: double &log;
+     id: count &log;
+     cnt: count &log;
+};
+
 type dns_telemetry_zone_stats: record {
      ts: double &log;
      key: string &log;
+     zoneid: count &log;
+     custid: count &log;
      total: count &log &default=0;
      A: count &log &default=0;
      AAAA: count &log &default=0;
@@ -3269,6 +3277,8 @@ type dns_telemetry_zone_stats: record {
 
 type dns_telemetry_qname_stats: record {
  ts: double &log;
+ zoneid:count &log;
+ custid:count &log;
  q: string &log;
  cnt: count &log &default=0;
  A: count &log &default=0;

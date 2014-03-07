@@ -131,6 +131,7 @@ RecordType* dns_telemetry_counts;
 RecordType* dns_telemetry_anyrd_stats;
 RecordType* dns_telemetry_client_stats;
 RecordType* dns_telemetry_zone_stats;
+RecordType* dns_telemetry_owner_stats;
 RecordType* dns_telemetry_qname_stats;
 RecordType* dns_telemetry_detail;
 
@@ -467,6 +468,7 @@ void init_net_var()
 	dns_telemetry_anyrd_stats = internal_type("dns_telemetry_anyrd_stats")->AsRecordType();
 	dns_telemetry_client_stats = internal_type("dns_telemetry_client_stats")->AsRecordType();
 	dns_telemetry_zone_stats = internal_type("dns_telemetry_zone_stats")->AsRecordType();
+	dns_telemetry_owner_stats = internal_type("dns_telemetry_owner_stats")->AsRecordType();
 	dns_telemetry_qname_stats = internal_type("dns_telemetry_qname_stats")->AsRecordType();
 	dns_telemetry_detail = internal_type("dns_telemetry_detail")->AsRecordType();
 

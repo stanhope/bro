@@ -141,19 +141,9 @@ bool do_anyrd_stats = true;
 bool do_client_stats = true;
 bool do_details = true;
 
-struct LogInfo {
-  double ts;
-  int owner_id;
-  char* fname;
-  BroFile* file;
-};
-
-struct LoggerInfo {
-  LogInfo* loggers[100000];
-  uint size = 0;
-};
-
-LoggerInfo LOGGER_INFO;
+// Set to true and ENSURE and a single log file will be created.
+// NOTE: Not fully implemented. Was the original behavior.
+bool SINGLE_DETAILS_LOG = false;
 
 declare(PDict,int);
 declare(PDict,QnameStats);
@@ -166,6 +156,23 @@ PDict(int) telemetry_client_stats;
 PDict(QnameStats) telemetry_qname_stats;
 PDict(ZoneStats) telemetry_zone_stats;
 PDict(ZoneInfo) telemetry_zone_info;
+
+struct LogInfo {
+  double ts;
+  int owner_id;
+  int log_id;
+  uint cnt;
+  PDict(int) zones;
+  char* fname;
+  BroFile* file;
+};
+
+struct LoggerInfo {
+  LogInfo* loggers[100000];
+  uint size = 0;
+};
+
+LoggerInfo LOGGER_INFO;
 
 uint MAP_TYPE = 0;
 
@@ -185,7 +192,7 @@ void set_index_type(uint map_t) {
     }
 }
 
-void set_do_details(bool enable, int logid, bool via_events, const char* fname) {
+void set_do_details(bool enable, const char* fname) {
   // strcpy(DETAILS_FILE_NAME, fname);
   do_details = enable;
 
@@ -200,11 +207,12 @@ void set_do_details(bool enable, int logid, bool via_events, const char* fname) 
 
   logger->fname = (char*)malloc(256);
   strcpy(logger->fname, fname);
-  logger->owner_id = 0;
+  logger->owner_id = -1; // MUST be < 0 for the multi-tenant single log file
+  logger->cnt = 0;
   logger->file = NULL;
   logger->ts = network_time;
 
-  fprintf(stderr, "set_do_details enable=%d logid=%d events=%d fname=%s\n", do_details, logid, via_events, fname);
+  fprintf(stderr, "set_do_details enable=%d fname=%s\n", do_details, fname);
 }
 
 CurCounts CNTS;
@@ -416,24 +424,101 @@ int DNS_Telemetry_Interpreter::ParseAnswers(DNS_Telemetry_MsgInfo* msg, int n, D
 
 void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, int logid, int statid) {
 
-  HashKey* zone_hash = new HashKey(name->CheckString());
+  const char* zname = name->CheckString();
+  HashKey* zone_hash = new HashKey(zname);
   ZoneInfo* zinfo = telemetry_zone_info.Lookup(zone_hash);
   if (!zinfo) {
     zinfo = new ZoneInfo();
     telemetry_zone_info.Insert(zone_hash, zinfo);
   }
-  strcpy(zinfo->key, name->CheckString());
+  strcpy(zinfo->key, zname);
   zinfo->zone_id = zone_id;
   zinfo->owner_id = owner_id;
   zinfo->log_id = logid;
   zinfo->stat_id = statid;
   zinfo->details = logid != 0;
 
+  fprintf(stderr, "\nzone_info_add %s zid=%d oid=%d lid=%d sid=%d\n", zname, zone_id, owner_id, logid, statid);
 
+  // See if we've got a logger for this
+  // Naive search first.
+  LogInfo* logger = NULL;
+  for (uint i = 0; i < LOGGER_INFO.size; i++) {
+    LogInfo* tmp = LOGGER_INFO.loggers[i];
+    if (tmp->owner_id == zinfo->owner_id) {
+      logger = tmp;
+      fprintf(stderr, "..found logger for %d %p\n", zinfo->owner_id, tmp);
+      break;
+    }
+  }
+
+  // TODO: DEAL with per customer stat logs (per second telemetry).
+
+  if (logger) {
+    // Update the logid. Could be toggling details on/off for a particular customer
+    // Owner ID can't / shouldn't change. Nor the location that we write these logs to.
+    fprintf(stderr, "..existing logger, old log_id=%d new=%d cnt=%u %p\n", logger->log_id, logid, logger->cnt, logger);
+    if (logid != 0) {
+      // Multiple zones being logged
+      // Only bump if this is a zone that we're not already logging for.
+      HashKey* key = new HashKey((bro_int_t)zone_id);
+      if (logger->zones.Lookup(key)) {
+	fprintf(stderr,"..already logging");
+      } else {
+	fprintf(stderr, "..new zone to log\n");
+	logger->zones.Insert(key, new int(zone_id));
+	logger->cnt++;
+      }
+      delete key;
+    } else {
+      if (logger->cnt >= 1) {
+	HashKey* key = new HashKey((bro_int_t)zone_id);
+	if (logger->zones.Lookup(key)) {
+	  logger->zones.Remove(key);
+	  logger->cnt--;
+	  fprintf(stderr, "..stopping logging cnt=%d\n", logger->cnt);
+	  if (logger->cnt == 0) {
+	    // Last remaining zone being logged
+	    logger->log_id = 0;
+	  }
+	} else {
+	  fprintf(stderr, "..ignoring, not logging\n");
+	}
+	delete key;
+      } else if (logger->cnt > 1) {
+	// Leave the log_id non-zero, indicates that we're continuing to log for at least one zone
+      } else {
+	// Already zero. log_id being zero means we've stopped logging. The file 
+	// will be rotated but no further logging will occur after the rotation until
+	// the zone logging is enabled again. The logger data structure will survive in memory
+	// however.
+      }
+    }
+  } else if (logid != 0) {
+
+    // If we don't have a logger info yet, create it.
+    if (logger == NULL) {
+      // Create and init a LogInfo structure
+      logger = new LogInfo();
+      logger->owner_id = zinfo->log_id;
+      logger->log_id = zinfo->log_id;
+      logger->ts = network_time;
+      logger->cnt = 1;
+      HashKey* key = new HashKey((bro_int_t)zone_id);
+      logger->zones.Insert(key, new int(zone_id));
+      delete key;
+      fprintf(stderr, "..creating logger for %s owner_id=%d log_id=%d size=%d %p\n", zname, zinfo->owner_id, zinfo->log_id, LOGGER_INFO.size, logger);
+      // Use the base multi-tenant logger's root
+      logger->fname = LOGGER_INFO.loggers[0]->fname;
+      // Remember that we created this one.
+      LOGGER_INFO.loggers[LOGGER_INFO.size++] = logger;
+    }
+  }
 }
 
 void __dns_telemetry_zone_info_list() {
 
+  // Dump the zone map
   IterCookie* c = telemetry_zone_info.InitForIteration();
   HashKey* k;
   ZoneInfo* val;
@@ -445,79 +530,78 @@ void __dns_telemetry_zone_info_list() {
 }
 
 void __dns_telemetry_fire_counts(double ts) {
-  if ( dns_telemetry_count )
-    {
-      val_list* vl = new val_list;
-      RecordVal* r = new RecordVal(dns_telemetry_counts);
+  if ( dns_telemetry_count ) {
+    val_list* vl = new val_list;
+    RecordVal* r = new RecordVal(dns_telemetry_counts);
 
-      double lag = current_time() - ts;
-      if (lag > 2) {
-	fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
-      }
-
-      r->Assign(0, new Val(ts, TYPE_DOUBLE));
-      r->Assign(1, new Val(lag, TYPE_DOUBLE));
-      r->Assign(2, new Val(CNTS.request, TYPE_COUNT));
-      r->Assign(3, new Val(CNTS.rejected, TYPE_COUNT));
-      r->Assign(4, new Val(CNTS.reply, TYPE_COUNT));
-      r->Assign(5, new Val(CNTS.non_dns_request, TYPE_COUNT));
-
-      r->Assign(6, new Val(CNTS.ANY_RD, TYPE_COUNT));
-
-      r->Assign(7, new Val(CNTS.ANY, TYPE_COUNT));
-      r->Assign(8, new Val(CNTS.A, TYPE_COUNT));
-      r->Assign(9, new Val(CNTS.AAAA, TYPE_COUNT));
-      r->Assign(10, new Val(CNTS.NS, TYPE_COUNT));
-      r->Assign(11, new Val(CNTS.CNAME, TYPE_COUNT));
-
-      r->Assign(12, new Val(CNTS.PTR, TYPE_COUNT));
-      r->Assign(13, new Val(CNTS.SOA, TYPE_COUNT));
-      r->Assign(14, new Val(CNTS.MX, TYPE_COUNT));
-      r->Assign(15, new Val(CNTS.TXT, TYPE_COUNT));
-      r->Assign(16, new Val(CNTS.SRV, TYPE_COUNT));
-      r->Assign(17, new Val(CNTS.other, TYPE_COUNT));
-
-      r->Assign(18, new Val(CNTS.TCP, TYPE_COUNT));
-      r->Assign(19, new Val(CNTS.UDP, TYPE_COUNT));
-      r->Assign(20, new Val(CNTS.TSIG, TYPE_COUNT));
-      r->Assign(21, new Val(CNTS.EDNS, TYPE_COUNT));
-      r->Assign(22, new Val(CNTS.RD, TYPE_COUNT));
-      r->Assign(23, new Val(CNTS.DO, TYPE_COUNT));
-      r->Assign(24, new Val(CNTS.CD, TYPE_COUNT));
-      r->Assign(25, new Val(CNTS.V4, TYPE_COUNT));
-      r->Assign(26, new Val(CNTS.V6, TYPE_COUNT));
-
-      r->Assign(27, new Val(CNTS.OpQuery, TYPE_COUNT));
-      r->Assign(28, new Val(CNTS.OpIQuery, TYPE_COUNT));
-      r->Assign(29, new Val(CNTS.OpStatus, TYPE_COUNT));
-      r->Assign(30, new Val(CNTS.OpNotify, TYPE_COUNT));
-      r->Assign(31, new Val(CNTS.OpUpdate, TYPE_COUNT));
-      r->Assign(32, new Val(CNTS.OpUnassigned, TYPE_COUNT));
-
-      r->Assign(33, new Val(CNTS.rcode_noerror, TYPE_COUNT));
-      r->Assign(34, new Val(CNTS.rcode_format_err, TYPE_COUNT));
-      r->Assign(35, new Val(CNTS.rcode_server_fail, TYPE_COUNT));
-      r->Assign(36, new Val(CNTS.rcode_nxdomain, TYPE_COUNT));
-      r->Assign(37, new Val(CNTS.rcode_not_impl, TYPE_COUNT));
-      r->Assign(38, new Val(CNTS.rcode_refused, TYPE_COUNT));
-
-      r->Assign(39, new Val(CNTS.logged, TYPE_COUNT));
-
-      uint qlen = CNTS.qlen ? CNTS.qlen / CNTS.request : 0;
-      uint rlen = CNTS.rlen ? CNTS.rlen / (CNTS.reply + CNTS.rejected) : 0;
-
-      r->Assign(40, new Val(qlen, TYPE_COUNT));
-      r->Assign(41, new Val(rlen, TYPE_COUNT));
-
-      r->Assign(42, new Val(CNTS.clients, TYPE_COUNT));
-      r->Assign(43, new Val(CNTS.zones, TYPE_COUNT));
-      r->Assign(44, new Val(CNTS.qlen/1048576.0, TYPE_DOUBLE));
-      r->Assign(45, new Val(CNTS.rlen/1048576.0, TYPE_DOUBLE));
-      r->Assign(46, new Val((CNTS.qlen+CNTS.rlen)/1048576.0, TYPE_DOUBLE));
-
-      vl->append(r);
-      mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
+    double lag = current_time() - ts;
+    if (lag > 2) {
+      fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
     }
+
+    r->Assign(0, new Val(ts, TYPE_DOUBLE));
+    r->Assign(1, new Val(lag, TYPE_DOUBLE));
+    r->Assign(2, new Val(CNTS.request, TYPE_COUNT));
+    r->Assign(3, new Val(CNTS.rejected, TYPE_COUNT));
+    r->Assign(4, new Val(CNTS.reply, TYPE_COUNT));
+    r->Assign(5, new Val(CNTS.non_dns_request, TYPE_COUNT));
+
+    r->Assign(6, new Val(CNTS.ANY_RD, TYPE_COUNT));
+
+    r->Assign(7, new Val(CNTS.ANY, TYPE_COUNT));
+    r->Assign(8, new Val(CNTS.A, TYPE_COUNT));
+    r->Assign(9, new Val(CNTS.AAAA, TYPE_COUNT));
+    r->Assign(10, new Val(CNTS.NS, TYPE_COUNT));
+    r->Assign(11, new Val(CNTS.CNAME, TYPE_COUNT));
+
+    r->Assign(12, new Val(CNTS.PTR, TYPE_COUNT));
+    r->Assign(13, new Val(CNTS.SOA, TYPE_COUNT));
+    r->Assign(14, new Val(CNTS.MX, TYPE_COUNT));
+    r->Assign(15, new Val(CNTS.TXT, TYPE_COUNT));
+    r->Assign(16, new Val(CNTS.SRV, TYPE_COUNT));
+    r->Assign(17, new Val(CNTS.other, TYPE_COUNT));
+
+    r->Assign(18, new Val(CNTS.TCP, TYPE_COUNT));
+    r->Assign(19, new Val(CNTS.UDP, TYPE_COUNT));
+    r->Assign(20, new Val(CNTS.TSIG, TYPE_COUNT));
+    r->Assign(21, new Val(CNTS.EDNS, TYPE_COUNT));
+    r->Assign(22, new Val(CNTS.RD, TYPE_COUNT));
+    r->Assign(23, new Val(CNTS.DO, TYPE_COUNT));
+    r->Assign(24, new Val(CNTS.CD, TYPE_COUNT));
+    r->Assign(25, new Val(CNTS.V4, TYPE_COUNT));
+    r->Assign(26, new Val(CNTS.V6, TYPE_COUNT));
+
+    r->Assign(27, new Val(CNTS.OpQuery, TYPE_COUNT));
+    r->Assign(28, new Val(CNTS.OpIQuery, TYPE_COUNT));
+    r->Assign(29, new Val(CNTS.OpStatus, TYPE_COUNT));
+    r->Assign(30, new Val(CNTS.OpNotify, TYPE_COUNT));
+    r->Assign(31, new Val(CNTS.OpUpdate, TYPE_COUNT));
+    r->Assign(32, new Val(CNTS.OpUnassigned, TYPE_COUNT));
+
+    r->Assign(33, new Val(CNTS.rcode_noerror, TYPE_COUNT));
+    r->Assign(34, new Val(CNTS.rcode_format_err, TYPE_COUNT));
+    r->Assign(35, new Val(CNTS.rcode_server_fail, TYPE_COUNT));
+    r->Assign(36, new Val(CNTS.rcode_nxdomain, TYPE_COUNT));
+    r->Assign(37, new Val(CNTS.rcode_not_impl, TYPE_COUNT));
+    r->Assign(38, new Val(CNTS.rcode_refused, TYPE_COUNT));
+
+    r->Assign(39, new Val(CNTS.logged, TYPE_COUNT));
+
+    uint qlen = CNTS.qlen ? CNTS.qlen / CNTS.request : 0;
+    uint rlen = CNTS.rlen ? CNTS.rlen / (CNTS.reply + CNTS.rejected) : 0;
+
+    r->Assign(40, new Val(qlen, TYPE_COUNT));
+    r->Assign(41, new Val(rlen, TYPE_COUNT));
+
+    r->Assign(42, new Val(CNTS.clients, TYPE_COUNT));
+    r->Assign(43, new Val(CNTS.zones, TYPE_COUNT));
+    r->Assign(44, new Val(CNTS.qlen/1048576.0, TYPE_DOUBLE));
+    r->Assign(45, new Val(CNTS.rlen/1048576.0, TYPE_DOUBLE));
+    r->Assign(46, new Val((CNTS.qlen+CNTS.rlen)/1048576.0, TYPE_DOUBLE));
+
+    vl->append(r);
+    mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
+  }
   // Clear counters
   memset(&CNTS, 0, sizeof(CurCounts));
 }
@@ -590,18 +674,16 @@ RecordVal*  __dns_telemetry_get_totals(double ts) {
 }
 
 void __dns_telemetry_fire_totals(double ts) {
-  if ( dns_telemetry_totals )
-    {
-      val_list* vl = new val_list;
-      vl->append(__dns_telemetry_get_totals(ts));
-      mgr.Dispatch(new Event(dns_telemetry_totals, vl), true);
-    } 
+  if ( dns_telemetry_totals ) {
+    val_list* vl = new val_list;
+    vl->append(__dns_telemetry_get_totals(ts));
+    mgr.Dispatch(new Event(dns_telemetry_totals, vl), true);
+  } 
 }
 
 void __dns_telemetry_fire_anyrd(double ts) {
   if ( dns_telemetry_anyrd_info ) {
-    int len = 0;
-    len = telemetry_anyrd_counts.Length();
+    int len = telemetry_anyrd_counts.Length();
     if (len > 0) {
       IterCookie* c = telemetry_anyrd_counts.InitForIteration();
       HashKey* k;
@@ -610,7 +692,9 @@ void __dns_telemetry_fire_anyrd(double ts) {
 	{
 	  char* key =  (char*)k->Key();
 	  int key_size =  k->Size();
-	  char anyrd_key[600]; // @componentry. NOT SAFE. FIX THIS. Making copy because of use of STRTOK which is destructive.
+	  // @componentry. NOT SAFE. FIX THIS. 
+	  // Making copy because of use of STRTOK which is destructive.	  
+	  char anyrd_key[600];
 	  strncpy(anyrd_key, key, key_size);
 	  anyrd_key[key_size] = 0;
 	  char seps[] = "|";
@@ -626,9 +710,8 @@ void __dns_telemetry_fire_anyrd(double ts) {
 	  mgr.Dispatch(new Event(dns_telemetry_anyrd_info, vl), true);
 	}
       telemetry_anyrd_counts.Clear();
-    }
-
-    if (len == 0) {
+    } else {
+      // Always emit an empty record for consistency and to ensure a file exists for the interval
       RecordVal* r = new RecordVal(dns_telemetry_anyrd_stats);
       r->Assign(0, new Val(ts, TYPE_DOUBLE));
       r->Assign(1, new StringVal(""));
@@ -638,48 +721,46 @@ void __dns_telemetry_fire_anyrd(double ts) {
       vl->append(r);
       mgr.Dispatch(new Event(dns_telemetry_anyrd_info, vl), true);
     }
-
   }
-
 }
 
 void __dns_telemetry_fire_clients(double ts) {
-  if ( dns_telemetry_client_info )
-    {
-      int len = telemetry_client_stats.Length();
-      if (len > 0) {
-	IterCookie* client_c = telemetry_client_stats.InitForIteration();
-	HashKey* client_k;
-	int* client_v;
-	while ((client_v = telemetry_client_stats.NextEntry(client_k, client_c)))
-	  {
-	    char* key =  (char*)client_k->Key();
-	    RecordVal* r = new RecordVal(dns_telemetry_client_stats);
-	    r->Assign(0, new Val(ts, TYPE_DOUBLE));
-	    r->Assign(1, new StringVal(key));
-	    r->Assign(2, new Val(*client_v, TYPE_COUNT));
-	    val_list* vl = new val_list;
-	    vl->append(r);
-	    mgr.Dispatch(new Event(dns_telemetry_client_info, vl), true);
-	  } 
-	telemetry_client_stats.Clear();
-      }
-      else {
-	RecordVal* r = new RecordVal(dns_telemetry_client_stats);
-	r->Assign(0, new Val(ts, TYPE_DOUBLE));
-	r->Assign(1, new StringVal(""));
-	r->Assign(2, new Val(0, TYPE_COUNT));
-	val_list* vl = new val_list;
-	vl->append(r);
-	mgr.Dispatch(new Event(dns_telemetry_client_info, vl), true);
-      }
+  if ( dns_telemetry_client_info ) {
+    int len = telemetry_client_stats.Length();
+    if (len > 0) {
+      IterCookie* client_c = telemetry_client_stats.InitForIteration();
+      HashKey* client_k;
+      int* client_v;
+      while ((client_v = telemetry_client_stats.NextEntry(client_k, client_c)))
+	{
+	  char* key =  (char*)client_k->Key();
+	  RecordVal* r = new RecordVal(dns_telemetry_client_stats);
+	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
+	  r->Assign(1, new StringVal(key));
+	  r->Assign(2, new Val(*client_v, TYPE_COUNT));
+	  val_list* vl = new val_list;
+	  vl->append(r);
+	  mgr.Dispatch(new Event(dns_telemetry_client_info, vl), true);
+	} 
+      telemetry_client_stats.Clear();
     }
+    else {
+      // Always emit an empty record for consistency and to ensure a file exists for the interval
+      RecordVal* r = new RecordVal(dns_telemetry_client_stats);
+      r->Assign(0, new Val(ts, TYPE_DOUBLE));
+      r->Assign(1, new StringVal(""));
+      r->Assign(2, new Val(0, TYPE_COUNT));
+      val_list* vl = new val_list;
+      vl->append(r);
+      mgr.Dispatch(new Event(dns_telemetry_client_info, vl), true);
+    }
+  }
 }
 
 void __dns_telemetry_fire_details(double ts, bool terminating) {
 
   // How we deal with synchronous, manual rotation.
-  // Special case for high-perf writing scenarios (> 250K QPS)
+  // Special case for high-perf writing scenarios (> 200K QPS)
   static char buf[256];
   static char rotate_fname[256];
   static char source_fname[256];
@@ -687,29 +768,45 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
   strftime(buf, sizeof(buf), "%y-%m-%d_%H.%M.%S", localtime(&time));
 
   for (uint i = 0; i < LOGGER_INFO.size; i++) {
+
     LogInfo* logger = LOGGER_INFO.loggers[i];
 
     char* root_fname = logger->fname;
     sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
     sprintf(rotate_fname, "%s-%08d-%s.log", root_fname, logger->owner_id, buf);
 
-    // fprintf(stderr, "Rotating %s => %s\n", source_fname, rotate_fname);
-    
-    if (logger->file != 0) {
-      logger->file->Flush();
-      logger->file->Close();
-      rotate_file_to_name(source_fname, rotate_fname, 0);
-    } else {
-      // fprintf(stderr, "Creating empty details for for %s\n", rotate_fname);
-      FILE* f = fopen(rotate_fname, "wb");
-      fclose(f);
-    }
+    if (i > 0 || (SINGLE_DETAILS_LOG && i == 0)) {
 
-    if (!terminating) {
-      if (logger->file != NULL) delete logger->file;
-      logger->file = new BroFile(fopen(source_fname, "wb"));
-    } else {
-      unlink(source_fname);
+      if (logger->file != 0) {
+	logger->file->Flush();
+	logger->file->Close();
+	fprintf(stderr, "Rotating %s => %s logger=%p cnt=%d\n", source_fname, rotate_fname, logger, logger->cnt);
+	rotate_file_to_name(source_fname, rotate_fname, 0);
+      } else {
+	if (logger->log_id != 0) {
+	  fprintf(stderr, "Creating empty details for for %s\n", rotate_fname);
+	  FILE* f = fopen(rotate_fname, "wb");
+	  fclose(f);
+	}
+      }
+      
+      if (!terminating) {
+	if (logger->file != NULL) delete logger->file;
+
+	// Only reopen if we're still logging 
+	if (logger->log_id == 0) {
+	  logger->file = NULL;
+	  fprintf(stderr, "Not opening logger file, now not logging for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
+	  unlink(source_fname);
+	} else {
+	  fprintf(stderr, "Opening new logger for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
+	  FILE* f = fopen(source_fname, "wb");
+	  // TODO What if we can't open the file? Permissions, etc...
+	  logger->file = new BroFile(f);
+	}
+      } else {
+	unlink(source_fname);
+      }
     }
   }
 
@@ -718,6 +815,8 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 void __dns_telemetry_fire_owners(double ts) {
   if (dns_telemetry_owner_info) {
     
+    fprintf(stderr, "fire_owners size=%d\n", OWNER_INFO.size);
+
     if (OWNER_INFO.size > 0) {
       uint slots = sizeof(OWNER_INFO.owners)/sizeof(OwnerStats*);
       for(uint i = 0; i < slots; i++) {
@@ -736,6 +835,7 @@ void __dns_telemetry_fire_owners(double ts) {
       }
       OWNER_INFO.size = 0;
     } else {
+      // Always emit an empty record for consistency and to ensure a file exists for the interval
       RecordVal* r = new RecordVal(dns_telemetry_owner_stats);
       r->Assign(0, new Val(ts, TYPE_DOUBLE));
       r->Assign(1, new Val(0, TYPE_COUNT));
@@ -749,8 +849,7 @@ void __dns_telemetry_fire_owners(double ts) {
 
 void __dns_telemetry_fire_zones(double ts) {
   if ( dns_telemetry_zone_info ) {
-    int len = 0;
-    len = telemetry_zone_stats.Length();
+    int len = telemetry_zone_stats.Length();
     if (len > 0) {
       IterCookie* zone_cookie = telemetry_zone_stats.InitForIteration();
       HashKey* zone_k;
@@ -784,9 +883,8 @@ void __dns_telemetry_fire_zones(double ts) {
 	  mgr.Dispatch(new Event(dns_telemetry_zone_info, vl), true);
 	}
       telemetry_zone_stats.Clear();
-    }
- 
-    if (len == 0) {
+    } else {
+      // Always emit an empty record for consistency and to ensure a file exists for the interval
       RecordVal* r = new RecordVal(dns_telemetry_zone_stats);
       r->Assign(0, new Val(ts, TYPE_DOUBLE));
       r->Assign(1, new StringVal(""));
@@ -894,403 +992,427 @@ void ReverseQname(char *string, int length)
 }
 
 int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
-				const u_char*& data, int& len,
+					     const u_char*& data, int& len,
 					     const u_char* msg_start, int is_query)
-	{
-	u_char name[513];
-	int name_len = sizeof(name) - 1;
+{
+  u_char name[513];
+  int name_len = sizeof(name) - 1;
 
-	char key_host [255];
-	char key_zone [255];
-	char tlz [255];
-	u_char* name_end;
+  char key_host [255];
+  char key_zone [255];
+  char tlz [255];
+  u_char* name_end;
 
-	//	if (is_query) 
-	  name_end = ExtractName(data, len, name, name_len, msg_start, key_host, key_zone, tlz);
-	  
-	  //	else 
-	  //	  name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
+  // Get the QNAME. 
+  //
+  // @componentry
+  //
+  // NOTES as of March 7 2014 @
+  //
+  // THIS CODE MUST CHANGE IN ORDER TO CALCULATE THE TLZ (Top Level Zone)
+  // We associate subsequent summarization with.
+  // Need to integrate the code from Rick that determines the LONGEST path
+  // and not the SHORTEST path as ExtractName does.
+  //
+  // key_host and key_zone are not used (yet). They may be used as more efficient
+  // hash keys when using sorted skip lists. They key_zone and key_host 
+  // are reversed:
+  //
+  // www.example.com => 
+  //
+  //    name = www.example.com
+  //    tlz = example.com
+  //    key_host = comexamplewww
+  //    key_zone = comexample
+  //
+  // ExtractName performs this work while decoding the raw labels in the DNS packet.
+  //
 
-	if ( ! name_end )
-		return 0;
+  name_end = ExtractName(data, len, name, name_len, msg_start, key_host, key_zone, tlz);
 
-	if ( len < int(sizeof(short)) * 2 )
-		{
-		analyzer->Weird("DNS_truncated_quest_too_short");
-		return 0;
-		}
+  if ( ! name_end )
+    return 0;
 
-	EventHandlerPtr dns_event = 0;
-	ZoneStats* zv = 0;
-	HashKey* zone_hash = new HashKey(tlz);
-	ZoneInfo* zinfo = 0;
-	OwnerStats* owner_stats = 0;
-	bool do_zone_details = false;
+  if ( len < int(sizeof(short)) * 2 )
+    {
+      analyzer->Weird("DNS_truncated_quest_too_short");
+      return 0;
+    }
 
-	if (do_zone_stats && dns_telemetry_zone_info) {
+  EventHandlerPtr dns_event = 0;
+  ZoneStats* zv = 0;
+  HashKey* zone_hash = new HashKey(tlz);
+  ZoneInfo* zinfo = 0;
+  OwnerStats* owner_stats = 0;
+  bool do_zone_details = false;
 
-	  zv = telemetry_zone_stats.Lookup(zone_hash);
-	  zinfo = telemetry_zone_info.Lookup(zone_hash);
+  if (do_zone_stats && dns_telemetry_zone_info) {
+
+    zv = telemetry_zone_stats.Lookup(zone_hash);
+    zinfo = telemetry_zone_info.Lookup(zone_hash);
 	    
-	  if (!zinfo) {
-	    // We don't know about this zone. See if we've already got an OTHER bucket.
-	    const char other[6] = "OTHER";
-	    HashKey* other_hash = new HashKey(other);
-	    zv = telemetry_zone_stats.Lookup(other_hash);
-	    // Get rid of the orignal hash and use the new one.
-	    delete zone_hash;
-	    zone_hash = other_hash;
+    if (!zinfo) {
+      // We don't know about this zone. See if we've already got an OTHER bucket.
+      const char other[6] = "OTHER";
+      HashKey* other_hash = new HashKey(other);
+      zv = telemetry_zone_stats.Lookup(other_hash);
+      // Get rid of the orignal hash and use the new one.
+      delete zone_hash;
+      zone_hash = other_hash;
 
-	    if (do_owner_stats && is_query) {
+      if (do_owner_stats && is_query) {
 
-	      owner_stats = OWNER_INFO.owners[0];
-	      if (owner_stats == 0) {
-		owner_stats = new OwnerStats();
-		owner_stats->id = 0;
-		owner_stats->cnt = 0;
-		OWNER_INFO.owners[0] = owner_stats;
-		OWNER_INFO.size++;
-		// fprintf(stderr, "Used slot %d for owner_id=%d (OTHER)\n", OWNER_INFO.size, 0);
-	      }
-	      ++owner_stats->cnt;
-
-	    }
-	  } else {
-
-	    do_zone_details = zinfo->details;
-	      
-	    if (do_owner_stats && is_query) {
-
-	      // Experimenting on performance of dedicated Array. Just how big should it be?
-	      // 100K default owners.
-
-	      // Deal with the fact that we MAY end up with NEGATIVE owner_id (to represent common BADDOMAIN traffic that
-	      // we want to start tracking individually. This is a FUTURE conern. PHIL - Mar 7 2014.
-	      owner_stats = OWNER_INFO.owners[zinfo->owner_id];
-	      if (owner_stats == 0) {
-		owner_stats = new OwnerStats();
-		owner_stats->id = zinfo->owner_id;
-		owner_stats->cnt = 0;
-		OWNER_INFO.owners[zinfo->owner_id] = owner_stats;
-		OWNER_INFO.size++;
-		// fprintf(stderr, "Used slot %d for owner_id=%d (%s)\n", OWNER_INFO.size, zinfo->owner_id, zinfo->key);
-	      }
-	      ++owner_stats->cnt;
-	    }
-
-	  }
-
-	  if (!zv) {
-	      
-	    ++CNTS.zones;
-	    zv = new ZoneStats();
-	    zv->cnt = 0;
-
-	    if (zinfo) {
-	      // A zone we know about
-	      strcpy(zv->key, tlz);
-	      zv->zone_id = zinfo->zone_id;
-	      zv->owner_id = zinfo->owner_id;
-	    } else {
-	      // OTHER bucket for now
-	      strcpy(zv->key, "OTHER");
-	      zv->zone_id = 0;
-	      zv->owner_id = 0;
-	    }
-
-	    telemetry_zone_stats.Insert(zone_hash, zv);
-	  }
+	owner_stats = OWNER_INFO.owners[0];
+	if (owner_stats == 0) {
+	  owner_stats = new OwnerStats();
+	  owner_stats->id = 0;
+	  owner_stats->cnt = 0;
+	  OWNER_INFO.owners[0] = owner_stats;
+	  OWNER_INFO.size++;
+	  // fprintf(stderr, "Used slot %d for owner_id=%d (OTHER)\n", OWNER_INFO.size, 0);
 	}
+	++owner_stats->cnt;
 
-	QnameStats* qname_stat = 0;
-	if (is_query && do_qname_stats && dns_telemetry_qname_info) {
-	  char qname_key[513];
-	  sprintf(qname_key, "%s", name);
-	  HashKey* qname_hash = new HashKey(qname_key);
-	  qname_stat = telemetry_qname_stats.Lookup(qname_hash);
-	  if (!qname_stat) {
-	    qname_stat = new QnameStats();
-	    qname_stat->cnt = 0;
-	    telemetry_qname_stats.Insert(qname_hash, qname_stat);
-	  } else {
-	    ++qname_stat->cnt;
-	  }
-	  delete qname_hash;
+      }
+    } else {
+
+      do_zone_details = zinfo->details;
+	      
+      if (do_owner_stats && is_query) {
+
+	// Experimenting on performance of dedicated Array. Just how big should it be?
+	// 100K default owners.
+
+	// Deal with the fact that we MAY end up with NEGATIVE owner_id (to represent common BADDOMAIN traffic that
+	// we want to start tracking individually. This is a FUTURE conern. PHIL - Mar 7 2014.
+	owner_stats = OWNER_INFO.owners[zinfo->owner_id];
+	if (owner_stats == 0) {
+	  owner_stats = new OwnerStats();
+	  owner_stats->id = zinfo->owner_id;
+	  owner_stats->cnt = 0;
+	  OWNER_INFO.owners[zinfo->owner_id] = owner_stats;
+	  OWNER_INFO.size++;
+	  // fprintf(stderr, "Used slot %d for owner_id=%d (%s)\n", OWNER_INFO.size, zinfo->owner_id, zinfo->key);
 	}
+	++owner_stats->cnt;
+      }
 
-	if ( msg->QR == 0 ) {
+    }
 
-	  dns_event = dns_telemetry_request;
+    if (!zv) {
+	      
+      ++CNTS.zones;
+      zv = new ZoneStats();
+      zv->cnt = 0;
 
-	  if (do_counts) {
-	    ++CNTS.request;
-	    ++TOTALS.request;
-	  }
-	  if (do_zone_stats) {
-	    ++zv->cnt;
-	    if (msg->RD) {
-	      ++zv->RD;
-	    }
-	  }
+      if (zinfo) {
+	// A zone we know about
+	strcpy(zv->key, tlz);
+	zv->zone_id = zinfo->zone_id;
+	zv->owner_id = zinfo->owner_id;
+      } else {
+	// OTHER bucket for now
+	strcpy(zv->key, "OTHER");
+	zv->zone_id = 0;
+	zv->owner_id = 0;
+      }
+
+      telemetry_zone_stats.Insert(zone_hash, zv);
+    }
+  }
+
+  QnameStats* qname_stat = 0;
+  if (is_query && do_qname_stats && dns_telemetry_qname_info) {
+    char qname_key[256];
+    sprintf(qname_key, "%s", name);
+    HashKey* qname_hash = new HashKey(qname_key);
+    qname_stat = telemetry_qname_stats.Lookup(qname_hash);
+    if (!qname_stat) {
+      qname_stat = new QnameStats();
+      qname_stat->cnt = 0;
+      telemetry_qname_stats.Insert(qname_hash, qname_stat);
+    } else {
+      ++qname_stat->cnt;
+    }
+    delete qname_hash;
+  }
+
+  if ( msg->QR == 0 ) {
+
+    dns_event = dns_telemetry_request;
+
+    if (do_counts) {
+      ++CNTS.request;
+      ++TOTALS.request;
+    }
+    if (do_zone_stats) {
+      ++zv->cnt;
+      if (msg->RD) {
+	++zv->RD;
+      }
+    }
 	
-	  const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
-	  string sAddr = orig_addr.AsString();
-	  if (is_query && do_client_stats) {
-	    char client_key[50];
-	    strcpy(client_key, sAddr.c_str()); 
-	    HashKey* client_hash = new HashKey(client_key);
-	    int* client_idx = telemetry_client_stats.Lookup(client_hash);
-	    if (client_idx) {
-	      ++(*client_idx);
-	    } else {
-	      telemetry_client_stats.Insert(client_hash, new int(1));
-	      ++CNTS.clients;
-	      ++TOTALS.zones;
-	    }
-	    delete client_hash;
-	  }
+    const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
+    string sAddr = orig_addr.AsString();
+    if (is_query && do_client_stats) {
+      char client_key[50];
+      strcpy(client_key, sAddr.c_str()); 
+      HashKey* client_hash = new HashKey(client_key);
+      int* client_idx = telemetry_client_stats.Lookup(client_hash);
+      if (client_idx) {
+	++(*client_idx);
+      } else {
+	telemetry_client_stats.Insert(client_hash, new int(1));
+	++CNTS.clients;
+	++TOTALS.zones;
+      }
+      delete client_hash;
+    }
 
-	  RR_Type qtype = RR_Type(ExtractShort(data, len));
-	  msg->qtype = qtype;
-	  if (do_counts) {
-	    switch (qtype) 
-	      {
-	      case TYPE_A:
-		++CNTS.A;
-		++TOTALS.A;
-		if (do_qname_stats)
-		  ++qname_stat->A;
-		if (do_zone_stats)
-		  ++zv->A;
-		break;
-	      case TYPE_NS:
-		++CNTS.NS;
-		++TOTALS.NS;
-		if (do_qname_stats)
-		  ++qname_stat->NS;
-		if (do_zone_stats)
-		  ++zv->NS;
-		break;
-	      case TYPE_CNAME:
-		++CNTS.CNAME;
-		++TOTALS.CNAME;
-		if (do_qname_stats)
-		  ++qname_stat->CNAME;
-		if (do_zone_stats)
-		  ++zv->CNAME;
-		break;
-	      case TYPE_SOA:
-		++CNTS.SOA;
-		++TOTALS.SOA;
-		if (do_qname_stats)
-		  ++qname_stat->SOA;
-		if (do_zone_stats)
-		  ++zv->SOA;
-		break;
-	      case TYPE_PTR:
-		++CNTS.PTR;
-		++TOTALS.PTR;
-		if (do_qname_stats)
-		  ++qname_stat->PTR;
-		if (do_zone_stats)
-		  ++zv->PTR;
-		break;
-	      case TYPE_MX:
-		++CNTS.MX;
-		++TOTALS.MX;
-		if (do_qname_stats)
-		  ++qname_stat->MX;
-		if (do_zone_stats)
-		  ++zv->MX;
-		break;
-	      case TYPE_TXT:
-		++CNTS.TXT;
-		++TOTALS.TXT;
-		if (do_qname_stats)
-		  ++qname_stat->TXT;
-		if (do_zone_stats)
-		  ++zv->TXT;
-		break;
-	      case TYPE_AAAA:
-		++CNTS.AAAA;
-		++TOTALS.AAAA;
-		if (do_qname_stats)
-		  ++qname_stat->AAAA;
-		if (do_zone_stats)
-		  ++zv->AAAA;
-		break;
-	      case TYPE_SRV:
-		++CNTS.SRV;
-		++TOTALS.SRV;
-		if (do_qname_stats)
-		  ++qname_stat->SRV;
-		if (do_zone_stats)
-		  ++zv->SRV;
-		break;
-	      case TYPE_ALL:
-		++CNTS.ANY;
-		++TOTALS.ANY;
-		if (do_qname_stats)
-		  ++qname_stat->other;
-		if (do_zone_stats)
-		  ++zv->other;
-		if (msg->RD) {
-		  ++CNTS.ANY_RD;
-		  ++TOTALS.ANY_RD;
+    RR_Type qtype = RR_Type(ExtractShort(data, len));
+    msg->qtype = qtype;
+    if (do_counts) {
+      switch (qtype) 
+	{
+	case TYPE_A:
+	  ++CNTS.A;
+	  ++TOTALS.A;
+	  if (do_qname_stats)
+	    ++qname_stat->A;
+	  if (do_zone_stats)
+	    ++zv->A;
+	  break;
+	case TYPE_NS:
+	  ++CNTS.NS;
+	  ++TOTALS.NS;
+	  if (do_qname_stats)
+	    ++qname_stat->NS;
+	  if (do_zone_stats)
+	    ++zv->NS;
+	  break;
+	case TYPE_CNAME:
+	  ++CNTS.CNAME;
+	  ++TOTALS.CNAME;
+	  if (do_qname_stats)
+	    ++qname_stat->CNAME;
+	  if (do_zone_stats)
+	    ++zv->CNAME;
+	  break;
+	case TYPE_SOA:
+	  ++CNTS.SOA;
+	  ++TOTALS.SOA;
+	  if (do_qname_stats)
+	    ++qname_stat->SOA;
+	  if (do_zone_stats)
+	    ++zv->SOA;
+	  break;
+	case TYPE_PTR:
+	  ++CNTS.PTR;
+	  ++TOTALS.PTR;
+	  if (do_qname_stats)
+	    ++qname_stat->PTR;
+	  if (do_zone_stats)
+	    ++zv->PTR;
+	  break;
+	case TYPE_MX:
+	  ++CNTS.MX;
+	  ++TOTALS.MX;
+	  if (do_qname_stats)
+	    ++qname_stat->MX;
+	  if (do_zone_stats)
+	    ++zv->MX;
+	  break;
+	case TYPE_TXT:
+	  ++CNTS.TXT;
+	  ++TOTALS.TXT;
+	  if (do_qname_stats)
+	    ++qname_stat->TXT;
+	  if (do_zone_stats)
+	    ++zv->TXT;
+	  break;
+	case TYPE_AAAA:
+	  ++CNTS.AAAA;
+	  ++TOTALS.AAAA;
+	  if (do_qname_stats)
+	    ++qname_stat->AAAA;
+	  if (do_zone_stats)
+	    ++zv->AAAA;
+	  break;
+	case TYPE_SRV:
+	  ++CNTS.SRV;
+	  ++TOTALS.SRV;
+	  if (do_qname_stats)
+	    ++qname_stat->SRV;
+	  if (do_zone_stats)
+	    ++zv->SRV;
+	  break;
+	case TYPE_ALL:
+	  ++CNTS.ANY;
+	  ++TOTALS.ANY;
+	  if (do_qname_stats)
+	    ++qname_stat->other;
+	  if (do_zone_stats)
+	    ++zv->other;
+	  if (msg->RD) {
+	    ++CNTS.ANY_RD;
+	    ++TOTALS.ANY_RD;
 
-		  if (do_anyrd_stats) {
-		    char anyrd_key[560];
-		    sprintf(anyrd_key, "%s|%s", sAddr.c_str(), name);
-		    HashKey* anyrd_hash = new HashKey(anyrd_key);
-		    //		    fprintf(stderr, "ANYRD key=%s len=%u hash_key=%s key_size=%d\n", anyrd_key, (unsigned int)strlen(anyrd_key), (const char*)anyrd_hash->Key(), anyrd_hash->Size());
-		    int* count_idx = telemetry_anyrd_counts.Lookup(anyrd_hash);
-		    if (count_idx) {
-		      ++(*count_idx);
-		    } else {
-		      telemetry_anyrd_counts.Insert(anyrd_hash, new int(1));
-		    }
-		    delete anyrd_hash;
-		  }
-
-		}
-		break;
-	      default:
-		++CNTS.other;
-		++TOTALS.other;
-		if (do_qname_stats)
-		  ++qname_stat->other;
-		if (do_zone_stats)
-		  ++zv->other;
-		break;
+	    if (do_anyrd_stats) {
+	      char anyrd_key[560];
+	      sprintf(anyrd_key, "%s|%s", sAddr.c_str(), name);
+	      HashKey* anyrd_hash = new HashKey(anyrd_key);
+	      //		    fprintf(stderr, "ANYRD key=%s len=%u hash_key=%s key_size=%d\n", anyrd_key, (unsigned int)strlen(anyrd_key), (const char*)anyrd_hash->Key(), anyrd_hash->Size());
+	      int* count_idx = telemetry_anyrd_counts.Lookup(anyrd_hash);
+	      if (count_idx) {
+		++(*count_idx);
+	      } else {
+		telemetry_anyrd_counts.Insert(anyrd_hash, new int(1));
 	      }
+	      delete anyrd_hash;
+	    }
+
+	  }
+	  break;
+	default:
+	  ++CNTS.other;
+	  ++TOTALS.other;
+	  if (do_qname_stats)
+	    ++qname_stat->other;
+	  if (do_zone_stats)
+	    ++zv->other;
+	  break;
+	}
+    }
+  }
+  else if ( msg->QR == 1 &&
+	    msg->ancount == 0 && msg->nscount == 0 && msg->arcount == 0 ) {
+    // Service rejected in some fashion, and it won't be reported
+    // via a returned RR because there aren't any.
+    dns_event = dns_telemetry_rejected;
+    if (do_counts) {
+      ++CNTS.rejected;
+      ++CNTS.rcode_refused;
+      ++TOTALS.rejected;
+      ++TOTALS.rcode_refused;
+    }
+    if (do_zone_stats)
+      ++zv->REFUSED;
+  }
+  else {
+    dns_event = dns_telemetry_query_reply;
+
+    if (do_details && do_zone_details) {
+
+      ++CNTS.logged;
+      ++TOTALS.logged;
+
+      const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
+      const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
+
+      char log_line[256];
+      sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,"","",msg->opcode);
+      uint len = strlen(log_line);
+      log_line[len++] = '\n';
+      log_line[len] = 0;
+
+      // Determine which logger we should use
+      LogInfo* logger = 0;
+      if (zinfo->log_id != 0) {
+	for (uint i = 0; i < LOGGER_INFO.size; i++) {
+	  LogInfo* _logger = LOGGER_INFO.loggers[i];
+	  if (_logger->owner_id == zinfo->log_id) {
+	    logger = _logger;
+	    break;
 	  }
 	}
-	else if ( msg->QR == 1 &&
-		  msg->ancount == 0 && msg->nscount == 0 && msg->arcount == 0 ) {
-		// Service rejected in some fashion, and it won't be reported
-		// via a returned RR because there aren't any.
-		dns_event = dns_telemetry_rejected;
-		if (do_counts) {
-		  ++CNTS.rejected;
-		  ++CNTS.rcode_refused;
-		  ++TOTALS.rejected;
-		  ++TOTALS.rcode_refused;
-		}
-		if (do_zone_stats)
-		  ++zv->REFUSED;
+	if (logger == 0) {
+	  fprintf(stderr, "WARN: Unexpected lack of LogInfo config zone_id=%d owner_id=%d log_id=%d\n", zinfo->zone_id, zinfo->owner_id, zinfo->log_id);
+	  // Create new logger
+	  logger = new LogInfo();
+	  logger->owner_id = zinfo->log_id;
+	  logger->log_id = zinfo->log_id;
+	  logger->ts = network_time;
+	  // Use the base multi-tenant logger's root
+	  logger->fname = LOGGER_INFO.loggers[0]->fname;
+	  // Remember that we created this one.
+	  LOGGER_INFO.loggers[LOGGER_INFO.size++] = logger;
 	}
-	else {
-	  dns_event = dns_telemetry_query_reply;
+      }
 
-	  if (do_details && do_zone_details && dns_telemetry_detail_info) {
-
-	    ++CNTS.logged;
-	    ++TOTALS.logged;
-
-	    const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
-	    const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
-
-	    char log_line[256];
-	    sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,"","",msg->opcode);
-	    uint len = strlen(log_line);
-	    log_line[len++] = '\n';
-	    log_line[len] = 0;
-
-	    // Determine which logger we should use
-	    LogInfo* logger = 0;
-	    if (zinfo->log_id != 0) {
-	      for (uint i = 0; i < LOGGER_INFO.size; i++) {
-		LogInfo* _logger = LOGGER_INFO.loggers[i];
-		if (_logger->owner_id == zinfo->log_id) {
-		  logger = _logger;
-		  break;
-		}
-	      }
-	      if (logger == 0) {
-		// Create new logger
-		logger = new LogInfo();
-		logger->owner_id = zinfo->log_id;
-		logger->ts = network_time;
-		// Use the base multi-tenant logger's root
-		logger->fname = LOGGER_INFO.loggers[0]->fname;
-		// Remember that we created this one.
-		LOGGER_INFO.loggers[LOGGER_INFO.size++] = logger;
-	      }
-	    }
-
-	    if (logger == NULL) {
-	      // Default to multi-tenant logger
-	      logger = LOGGER_INFO.loggers[0];
-	    }
+      if (logger == NULL) {
+	// Default to multi-tenant logger
+	logger = LOGGER_INFO.loggers[0];
+      }
 	    
-	    if (logger->file == NULL) {
-	      static char source_fname[256];
-	      static char* root_fname = logger->fname;
-	      sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
-	      fprintf(stderr, "Creating logger %s\n", source_fname);
-	      logger->file = new BroFile(fopen(source_fname, "wb"));
-	    }
-	    logger->file->Write(log_line, len);
+      if (logger->file == NULL) {
+	static char source_fname[256];
+	static char* root_fname = logger->fname;
+	sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
+	fprintf(stderr, "Creating logger %s\n", source_fname);
+	FILE* f = fopen(source_fname, "wb");
+	logger->file = new BroFile(f);
+      }
+      logger->file->Write(log_line, len);
 
+    }
+
+    if (do_counts) {
+      switch (msg->rcode) 
+	{
+	case DNS_CODE_OK: {
+	  ++CNTS.rcode_noerror;
+	  ++CNTS.reply;
+	  ++TOTALS.reply;
+	  ++TOTALS.rcode_noerror;
+	  if (do_zone_stats) {
+	    ++zv->NOERROR;
 	  }
-
-	  if (do_counts) {
-	    switch (msg->rcode) 
-	      {
-	      case DNS_CODE_OK: {
-		++CNTS.rcode_noerror;
-		++CNTS.reply;
-		++TOTALS.reply;
-		++TOTALS.rcode_noerror;
-		if (do_zone_stats) {
-		  ++zv->NOERROR;
-		}
-		break;
-	      }
-	      case DNS_CODE_FORMAT_ERR:
-		++CNTS.rcode_format_err;
-		++TOTALS.rcode_format_err;
-		break;
-	      case DNS_CODE_SERVER_FAIL:
-		++CNTS.rcode_server_fail;
-		++TOTALS.rcode_server_fail;
-		break;
-	      case DNS_CODE_NAME_ERR:
-		++CNTS.rcode_nxdomain;
-		++TOTALS.rcode_nxdomain;
-		if (do_zone_stats)
-		  ++zv->NXDOMAIN;
-		break;
-	      case DNS_CODE_NOT_IMPL:
-		++CNTS.rcode_not_impl;
-		++TOTALS.rcode_not_impl;
-		break;
-	      case DNS_CODE_REFUSED:
-		++CNTS.rcode_refused;
-		++TOTALS.rcode_refused;
-		if (do_zone_stats)
-		  ++zv->REFUSED;
-		break;
-	      }
-	  }
+	  break;
 	}
-
-	if ( dns_event && ! msg->skip_event )
-		{
-		BroString* question_name =
-			new BroString(name, name_end - name, 1);
-		SendReplyOrRejectEvent(msg, dns_event, data, len, question_name);
-		}
-	else
-		{
-		// Consume the unused type/class.
-		(void) ExtractShort(data, len);
-		(void) ExtractShort(data, len);
-		}
-
-	delete zone_hash;
-	return 1;
+	case DNS_CODE_FORMAT_ERR:
+	  ++CNTS.rcode_format_err;
+	  ++TOTALS.rcode_format_err;
+	  break;
+	case DNS_CODE_SERVER_FAIL:
+	  ++CNTS.rcode_server_fail;
+	  ++TOTALS.rcode_server_fail;
+	  break;
+	case DNS_CODE_NAME_ERR:
+	  ++CNTS.rcode_nxdomain;
+	  ++TOTALS.rcode_nxdomain;
+	  if (do_zone_stats)
+	    ++zv->NXDOMAIN;
+	  break;
+	case DNS_CODE_NOT_IMPL:
+	  ++CNTS.rcode_not_impl;
+	  ++TOTALS.rcode_not_impl;
+	  break;
+	case DNS_CODE_REFUSED:
+	  ++CNTS.rcode_refused;
+	  ++TOTALS.rcode_refused;
+	  if (do_zone_stats)
+	    ++zv->REFUSED;
+	  break;
 	}
+    }
+  }
+
+  if ( dns_event && ! msg->skip_event )
+    {
+      BroString* question_name =
+	new BroString(name, name_end - name, 1);
+      SendReplyOrRejectEvent(msg, dns_event, data, len, question_name);
+    }
+  else
+    {
+      // Consume the unused type/class.
+      (void) ExtractShort(data, len);
+      (void) ExtractShort(data, len);
+    }
+
+  delete zone_hash;
+  return 1;
+}
 
 int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 				const u_char*& data, int& len,

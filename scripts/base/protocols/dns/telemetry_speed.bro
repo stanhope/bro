@@ -47,11 +47,9 @@ type ConfigRecord: record {
     zones: bool;
     owners: bool;
     anyrd: bool;
-    hostnames: bool;
+    qnames: bool;
     pcaps: bool;
     clients: bool;
-    max_clients: count;
-    index_type: count;
 };
 
 type ZoneInfo: record {
@@ -87,7 +85,7 @@ global zones_loaded:bool = F;
 global path_log_details = "/var/log/dyn/qps/details";
 global path_log_zones = "/var/log/dyn/qps/zones";
 global path_log_owners = "/var/log/dyn/qps/customers";
-global path_log_hostnames = "/var/log/dyn/qps/hostnames";
+global path_log_qnames = "/var/log/dyn/qps/qnames";
 global path_log_clients = "/var/log/dyn/ops/clients";
 global path_log_counts = "/var/log/dyn/ops/counts";
 global path_log_anyrd = "/var/log/dyn/ops/anyrd";
@@ -97,8 +95,6 @@ global path_config_dbind = "/etc/dbind/bro_dns_telemetry.cfg";
 global path_config_zones = "/etc/dbind/bro_zones.cfg";
 
 redef enum Log::ID += { ZONES, DETAILS, OWNERS, QNAMES, COUNTS, ANYRD, CLIENTS };
-
-global client_counts_max:count = 10;
 
 function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
 {
@@ -166,11 +162,9 @@ event config_change(description: Input::TableDescription, tpe: Input::Event, lef
 	do_details = item$details;
 	do_zones = item$zones;
 	do_owners = item$owners;
-	do_qnames = item$hostnames;
+	do_qnames = item$qnames;
 	do_pcaps = item$pcaps;
-	index_type = item$index_type;
 
- 	client_counts_max = item$max_clients;
         local cur_trace_file = pkt_dumper_file();
 	if (!do_pcaps) {
 	    if (cur_trace_file != "") {
@@ -215,8 +209,7 @@ event Input::end_of_data(name: string, source: string)
 	dns_telemetry_set_do_clients(do_clients);
 	dns_telemetry_set_do_counts(do_counts);
 	dns_telemetry_set_do_totals(T);
-	dns_telemetry_set_do_details(do_details, DBIND9::DETAILS, F, path_log_details);
-	dns_telemetry_set_index_type(index_type);
+	dns_telemetry_set_do_details(do_details, path_log_details);
     }
     if (zones_loaded && config_loaded) {
     
@@ -234,8 +227,7 @@ event bro_init()
    CreateLogStream(DBIND9::ANYRD, [$columns=dns_telemetry_anyrd_stats], path_log_anyrd);
    CreateLogStream(DBIND9::ZONES, [$columns=dns_telemetry_zone_stats], path_log_zones);
    CreateLogStream(DBIND9::OWNERS, [$columns=dns_telemetry_owner_stats], path_log_owners);
-   CreateLogStream(DBIND9::QNAMES, [$columns=dns_telemetry_qname_stats], path_log_hostnames);
-   CreateLogStream(DBIND9::DETAILS, [$columns=dns_telemetry_detail], path_log_details);
+   CreateLogStream(DBIND9::QNAMES, [$columns=dns_telemetry_qname_stats], path_log_qnames);
 
     if (reading_live_traffic()) {
         pkt_dumper_set(path_log_pcaps);
@@ -271,22 +263,22 @@ event dns_telemetry_totals(info:dns_telemetry_counts) {
 }
 
 event dns_telemetry_anyrd_info(info:dns_telemetry_anyrd_stats) {
-  print fmt("event.dns_telemetry_anyrd %s", info);
+#  print fmt("event.dns_telemetry_anyrd %s", info);
   Log::write_at(info$ts, DBIND9::ANYRD, info);
 }
 
 event dns_telemetry_client_info(info:dns_telemetry_client_stats) {
-  print fmt("event.dns_telemetry_client %s", info);
+#  print fmt("event.dns_telemetry_client %s", info);
   Log::write_at(info$ts, DBIND9::CLIENTS, info);
 }
 
 event dns_telemetry_zone_info(info:dns_telemetry_zone_stats) {
-  print fmt("event.dns_telemetry_zone %s", info);
+#  print fmt("event.dns_telemetry_zone %s", info);
   Log::write_at(info$ts, DBIND9::ZONES, info);
 }
 
 event dns_telemetry_owner_info(info:dns_telemetry_owner_stats) {
-  print fmt("event.dns_telemetry_owner %s", info);
+#  print fmt("event.dns_telemetry_owner %s", info);
   Log::write_at(info$ts, DBIND9::OWNERS, info);
 }
 
@@ -295,8 +287,4 @@ event dns_telemetry_qname_info(info:dns_telemetry_qname_stats) {
   Log::write_at(info$ts, DBIND9::QNAMES, info);
 }
 
-event dns_telemetry_detail_info(info:dns_telemetry_detail) {
-#  print fmt("details %s", info);      
-  Log::write(DBIND9::DETAILS, info);
-}
 

@@ -148,7 +148,7 @@ extern bool do_totals;
 extern bool do_details;
 
 extern void set_index_type(uint);
-extern void set_do_details(bool enable, int logid, bool via_events, const char* fname);
+extern void set_do_details(bool enable, const char* fname);
 
 extern void __dns_telemetry_fire_counts(double ts);
 extern void __dns_telemetry_fire_totals(double ts);
@@ -272,10 +272,9 @@ function dns_telemetry_set_index_type%(map_t:count%): any
 
 # Sure, a little ugly. But it accomplishes what I need. 
 # See analyzers/protocols/dns_telemetry/DNS.cc for what this is about.
-function dns_telemetry_set_do_details%(enable:bool, id: Log::ID, write_via_events:bool, fname:string%): any
+function dns_telemetry_set_do_details%(enable:bool, fname:string%): any
 %{
-	int logid = id->AsEnumVal()->CoerceToInt();
-	set_do_details(enable, logid, write_via_events, fname->CheckString());
+	set_do_details(enable, fname->CheckString());
 	return 0;
 %}
 

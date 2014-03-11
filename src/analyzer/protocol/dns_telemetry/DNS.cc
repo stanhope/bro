@@ -94,8 +94,10 @@ struct OwnerStats {
   uint cnt;
 };
 
+// TODO: Make this a dynamic linked list and or PDict
+// No artificial limits on size
 struct OwnerInfo {
-  OwnerStats* owners[100000];
+  OwnerStats* owners[1000000];
   uint size = 0; 
 };
 
@@ -176,6 +178,7 @@ struct DetailLogInfo {
   BroFile* file;
 };
 
+// TODO: Make this linked list or PDict so that we have no arbitrary limits
 struct DetailLoggerInfo {
   DetailLogInfo* loggers[100000];
   uint size = 0;
@@ -455,7 +458,13 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
   zinfo->stat_id = statid;
   zinfo->details = logid != 0;
 
-  // fprintf(stderr, "\nzone_info_add %s zid=%d oid=%d lid=%d sid=%d\n", zname, zone_id, owner_id, logid, statid);
+  if (logid != 0 && logid != owner_id) {
+    fprintf(stderr, "ERROR: log_id must be either 0 or the owner_id logid=%d owner_id=%d zone_id=%d %s\n", logid, owner_id, zone_id, zname);
+    return;
+  }
+
+  if (logid != 0)
+    fprintf(stderr, "zone_info_add %s zid=%d oid=%d lid=%d sid=%d\n", zname, zone_id, owner_id, logid, statid);
 
   // See if we've got a logger for this
   // Naive search first.
@@ -532,11 +541,12 @@ void __dns_telemetry_zone_info_list() {
   IterCookie* c = telemetry_zone_info.InitForIteration();
   HashKey* k;
   ZoneInfo* val;
-  fprintf(stderr,"---- Zone Info Map len=%d----\n", telemetry_zone_info.Length());
+  fprintf(stderr,"Zone Info len=%d loggers=%d\n", telemetry_zone_info.Length(), DETAIL_LOGGER_INFO.size);
+  /*
   while ((val = telemetry_zone_info.NextEntry(k, c))) {
     fprintf(stderr," name=%s zone_id=%u owner_id=%d details=%d\n", val->key, val->zone_id, val->owner_id, val->details);
   }
-
+  */
 }
 
 void __dns_telemetry_fire_counts(double ts) {
@@ -780,14 +790,14 @@ FILE* file_rotate(const char* name, const char* to_name)
   // First open the new file using a temporary name.
   FILE* newf = fopen(tmpname, "w");
   if ( ! newf ) {
-    fprintf(stderr, "file_rotate: can't open %s: %s", tmpname, strerror(errno));
+    fprintf(stderr, "file_rotate (open): can't open %s: %s\n", tmpname, strerror(errno));
     return 0;
   }
 
   // Then move old file to and make sure it really gets created.
   struct stat dummy;
   if ( link(name, newname) < 0 || stat(newname, &dummy) < 0 ) {
-    fprintf(stderr, "file_rotate: can't move %s to %s: %s", name, newname, strerror(errno));
+    fprintf(stderr, "file_rotate (move): can't move %s to %s: %s\n", name, newname, strerror(errno));
     fclose(newf);
     unlink(newname);
     unlink(tmpname);
@@ -796,7 +806,7 @@ FILE* file_rotate(const char* name, const char* to_name)
 
   // Close current file, and move the tmp to its place.
   if ( unlink(name) < 0 || link(tmpname, name) < 0 || unlink(tmpname) < 0 ) {
-    reporter->Error("file_rotate: can't move %s to %s: %s", tmpname, name, strerror(errno));
+    reporter->Error("file_rotate (close): can't move %s to %s: %s\n", tmpname, name, strerror(errno));
     exit(1);	// hard to fix, but shouldn't happen anyway...
   }
 

@@ -198,7 +198,7 @@ event Input::end_of_data(name: string, source: string)
 	  # print item;
    	  dns_telemetry_zone_info_add(item$name, item$zoneid, item$ownid, item$logid, item$statid, item$qnameid);
 	}
-	# dns_telemetry_zone_info_list();
+	dns_telemetry_zone_info_list();
 
     } else if (name == path_config_dbind) {
 	print fmt("Loaded @ %s [%s]: %s%s", current_time(), name, current_config_idx, current_config_val);

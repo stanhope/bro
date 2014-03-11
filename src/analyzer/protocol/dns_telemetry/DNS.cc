@@ -2,7 +2,7 @@
 
 // TODOs
 //
-// 1) Implement per zone qname reporting. The current implementation will enable for ALL qnames. This is way to expensive.
+// 1) Implement per zone QNAME reporting. The current implementation will enable for ALL qnames. This is way to expensive.
 // 2) Implement per zone COUNT telemetry. The current implementation is global (aggregate) counts used for operational purposes.
 //
 //    A possible solution to this is to stop all use of the BRO logging framework and leverage the capability do high-volume
@@ -94,17 +94,12 @@ struct OwnerStats {
   uint cnt;
 };
 
-// TODO: Make this a dynamic linked list and or PDict
-// No artificial limits on size
-struct OwnerInfo {
-  OwnerStats* owners[1000000];
-  uint size = 0; 
-};
+declare(PDict,OwnerStats);
 
-OwnerInfo OWNER_INFO;
+PDict(OwnerStats) OWNER_INFO;
 
 struct ZoneStats {
-  char key[128];
+  char key[255];
   uint zone_id;
   uint owner_id;
   uint cnt;
@@ -126,7 +121,7 @@ struct ZoneStats {
 };
 
 struct QnameStats {
-  char query[128];
+  char query[255];
   uint zone_id;
   uint owner_id;
   int cnt;
@@ -142,6 +137,18 @@ struct QnameStats {
   int other;
 };
 
+declare(PDict,int);
+declare(PDict,QnameStats);
+declare(PDict,ZoneStats);
+declare(PDict,ZoneInfo);
+
+PDict(int) telemetry_anyrd_counts;
+PDict(int) telemetry_client_stats;
+PDict(QnameStats) telemetry_qname_stats;
+PDict(ZoneStats) telemetry_zone_stats;
+PDict(ZoneInfo) telemetry_zone_info;
+
+
 bool do_counts = false;
 bool do_totals = false;
 bool do_zone_stats = true;
@@ -155,73 +162,47 @@ bool do_details = true;
 // NOTE: Not fully implemented. Was the original behavior.
 bool SINGLE_DETAILS_LOG = false;
 
-declare(PDict,int);
-declare(PDict,QnameStats);
-declare(PDict,ZoneStats);
-declare(PDict,ZoneInfo);
-declare(PDict,OwnerStats);
-
-PDict(int) telemetry_anyrd_counts;
-PDict(int) telemetry_client_stats;
-PDict(QnameStats) telemetry_qname_stats;
-PDict(ZoneStats) telemetry_zone_stats;
-PDict(ZoneInfo) telemetry_zone_info;
-
 struct DetailLogInfo {
   double ts;
   int owner_id;
   int log_id;
   int zone_id;
-  uint cnt;
+  // uint cnt;
+  bool enabled;
   PDict(int) zones;
   char* fname;
   BroFile* file;
 };
 
-// TODO: Make this linked list or PDict so that we have no arbitrary limits
-struct DetailLoggerInfo {
-  DetailLogInfo* loggers[100000];
-  uint size = 0;
-};
+char DEFAULT_DETAILS[512] = "/var/log/dyn/qps/details";
+declare(PDict,DetailLogInfo);
+PDict(DetailLogInfo) DETAIL_LOGGER_INFO;
 
-DetailLoggerInfo DETAIL_LOGGER_INFO;
-
-uint MAP_TYPE = 0;
-
-void set_index_type(uint map_t) {
-  MAP_TYPE = map_t;
-  switch (MAP_TYPE) 
-    {
-    case 0:
-      fprintf(stderr, "set_index_type: Using BRO Dictionary\n");
-      break;
-    case 1:
-      fprintf(stderr, "set_index_type: Using C++ unordered_map\n");
-      break;
-    case 2:
-      fprintf(stderr, "set_index_type: Using Google dense_hash_map\n");
-      break;
-    }
-}
+// Tracks open loggers. Important for the MultiZone (logid=2) scenario.
+PDict(DetailLogInfo) DETAIL_LOGGER_OPEN;
 
 void set_do_details(bool enable, const char* fname) {
-  // strcpy(DETAILS_FILE_NAME, fname);
+
   do_details = enable;
 
   DetailLogInfo* logger;
-  if (DETAIL_LOGGER_INFO.size == 0) {
+  HashKey* key = new HashKey((bro_int_t)0);
+  if (DETAIL_LOGGER_INFO.Length() == 0) {
     logger = new DetailLogInfo();
-    DETAIL_LOGGER_INFO.loggers[0] = logger;
-    ++DETAIL_LOGGER_INFO.size;
+    DETAIL_LOGGER_INFO.Insert(key, logger);
   } else {
-    logger = DETAIL_LOGGER_INFO.loggers[0];
+    logger = DETAIL_LOGGER_INFO.Lookup(key);
   }
+  delete key;
 
-  logger->fname = (char*)malloc(256);
-  strcpy(logger->fname, fname);
-  logger->owner_id = -1; // MUST be < 0 for the multi-tenant single log file
-  logger->cnt = 0;
+  // logger->fname = (char*)malloc(256);
+  // strcpy(logger->fname, fname);
+  strcpy(DEFAULT_DETAILS, fname);
+  logger->fname = DEFAULT_DETAILS;
+  logger->owner_id = 0;
+  logger->enabled = false;
   logger->file = NULL;
+  logger->log_id = 3;
   logger->ts = network_time;
 
   fprintf(stderr, "set_do_details enable=%d fname=%s\n", do_details, fname);
@@ -441,6 +422,7 @@ int DNS_Telemetry_Interpreter::ParseAnswers(DNS_Telemetry_MsgInfo* msg, int n, D
 	return n == 0;
 	}
 
+/*
 void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, int logid, int statid, int qnameid) {
 
   // TODO: Implement QNAME logging. The current implementation
@@ -466,23 +448,17 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
   if (logid != 0)
     fprintf(stderr, "zone_info_add %s zid=%d oid=%d lid=%d sid=%d\n", zname, zone_id, owner_id, logid, statid);
 
-  // See if we've got a logger for this
-  // Naive search first.
   DetailLogInfo* logger = NULL;
-  for (uint i = 0; i < DETAIL_LOGGER_INFO.size; i++) {
-    DetailLogInfo* tmp = DETAIL_LOGGER_INFO.loggers[i];
-    if (tmp->owner_id == zinfo->owner_id) {
-      logger = tmp;
-      break;
-    }
-  }
-
-  // TODO: DEAL with per customer stat logs (per second telemetry).
+  HashKey* logger_key = new HashKey((bro_int_t)zinfo->owner_id);
+  logger = DETAIL_LOGGER_INFO.Lookup(logger_key);
+  delete logger_key;
 
   if (logger) {
+
     // Update the logid. Could be toggling details on/off for a particular customer
     // Owner ID can't / shouldn't change. Nor the location that we write these logs to.
     if (logid != 0) {
+
       // Multiple zones being logged
       // Only bump if this is a zone that we're not already logging for.
       HashKey* key = new HashKey((bro_int_t)zone_id);
@@ -491,6 +467,7 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
 	logger->cnt++;
       }
       delete key;
+
     } else {
       if (logger->cnt >= 1) {
 	HashKey* key = new HashKey((bro_int_t)zone_id);
@@ -513,6 +490,7 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
 	// however.
       }
     }
+
   } else if (logid != 0) {
 
     // If we don't have a logger info yet, create it.
@@ -528,9 +506,84 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
       logger->zones.Insert(key, new int(zone_id));
       delete key;
       // Use the base multi-tenant logger's root
-      logger->fname = DETAIL_LOGGER_INFO.loggers[0]->fname;
-      // Remember that we created this one.
-      DETAIL_LOGGER_INFO.loggers[DETAIL_LOGGER_INFO.size++] = logger;
+      logger->fname = DEFAULT_DETAILS;
+      HashKey* log_key = new HashKey((bro_int_t)zinfo->owner_id);
+      DETAIL_LOGGER_INFO.Insert(log_key, logger);
+      delete log_key;
+    }
+  }
+}
+*/
+
+void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, int logid, int statid, int qnameid) {
+
+  // TODO: Implement QNAME logging.
+  // TODO: Implement STATS logging.
+
+  const char* zname = name->CheckString();
+  HashKey* zone_hash = new HashKey(zname);
+  ZoneInfo* zinfo = telemetry_zone_info.Lookup(zone_hash);
+  if (!zinfo) {
+    zinfo = new ZoneInfo();
+    telemetry_zone_info.Insert(zone_hash, zinfo);
+  }
+  strcpy(zinfo->key, zname);
+  zinfo->zone_id = zone_id;
+  zinfo->owner_id = owner_id;
+  zinfo->log_id = logid;
+  zinfo->stat_id = statid;
+  zinfo->details = logid != 0;
+
+  if (logid > 3) {
+    fprintf(stderr, "ERROR: log_id must be either 0 (none), 1 (owner), 2 (zone) or 3 (common) logid=%d owner_id=%d zone_id=%d %s\n", logid, owner_id, zone_id, zname);
+    return;
+  }
+
+  if (logid != 0) 
+    fprintf(stderr, "zone_info_ad\t%s\tzid=%d\toid=%d\tlid=%d\tsid=%d\n", zname, zone_id, owner_id, logid, statid);
+
+  DetailLogInfo* logger = NULL;
+  HashKey* logger_key = new HashKey((bro_int_t)zinfo->zone_id);
+  logger = DETAIL_LOGGER_INFO.Lookup(logger_key);
+  delete logger_key;
+  
+  if (logid == 0 && logger) {
+
+    // Update the logid. Could be toggling details on/off for a particular customer
+    // Owner ID can't / shouldn't change. Nor the location that we write these logs to.
+    logger->log_id = logid;
+    logger->enabled = false;
+
+  } else if (logid != 0) {
+
+    // If we don't have a logger info yet, create it.
+    if (logger == NULL) {
+      // Create and init a DetailLogInfo structure
+      logger = new DetailLogInfo();
+      logger->owner_id = zinfo->owner_id;
+      logger->log_id = zinfo->log_id;
+      logger->zone_id = zinfo->zone_id;
+      logger->ts = network_time;
+      logger->enabled = true;
+      
+      if (logid == 3) {
+	// Ensure that the common logger is enabled
+	HashKey* common_logger_key = new HashKey((bro_int_t)0);
+	DetailLogInfo* common_logger = DETAIL_LOGGER_INFO.Lookup(common_logger_key);
+	if (common_logger == 0) {
+	  fprintf(stderr, "ERROR: Unable to find default (common) logger!\n");
+	  exit(1);
+	} else {
+	  common_logger->enabled = true;
+	}
+	delete common_logger_key;
+      }
+
+      // Use the base multi-tenant logger's root
+      logger->fname = DEFAULT_DETAILS;
+      HashKey* log_key = new HashKey((bro_int_t)zinfo->zone_id);
+      DETAIL_LOGGER_INFO.Insert(log_key, logger);
+      delete log_key;
     }
   }
 }
@@ -541,12 +594,7 @@ void __dns_telemetry_zone_info_list() {
   IterCookie* c = telemetry_zone_info.InitForIteration();
   HashKey* k;
   ZoneInfo* val;
-  fprintf(stderr,"Zone Info len=%d loggers=%d\n", telemetry_zone_info.Length(), DETAIL_LOGGER_INFO.size);
-  /*
-  while ((val = telemetry_zone_info.NextEntry(k, c))) {
-    fprintf(stderr," name=%s zone_id=%u owner_id=%d details=%d\n", val->key, val->zone_id, val->owner_id, val->details);
-  }
-  */
+  fprintf(stderr,"Zone Info len=%d loggers=%d\n", telemetry_zone_info.Length(), DETAIL_LOGGER_INFO.Length());
 }
 
 void __dns_telemetry_fire_counts(double ts) {
@@ -826,75 +874,163 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
   time_t time = (time_t) ts-59;; // ugly. We're getting called @ the 59'th
   strftime(buf, sizeof(buf), "%y-%m-%d_%H.%M.%S", localtime(&time));
 
-  for (uint i = 0; i < DETAIL_LOGGER_INFO.size; i++) {
+  IterCookie* cookie = DETAIL_LOGGER_INFO.InitForIteration();
+  HashKey* key;
+  OwnerStats* info;
+  DetailLogInfo* logger;
+  int i = 0;
+  bool common_rotated = false;
+  PDict(int) owners;
 
-    DetailLogInfo* logger = DETAIL_LOGGER_INFO.loggers[i];
+  while ((logger = DETAIL_LOGGER_INFO.NextEntry(key, cookie))) {
 
     char* root_fname = logger->fname;
-    sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
-    sprintf(rotate_fname, "%s-%08d-%s.log", root_fname, logger->owner_id, buf);
+
+    bool enabled = logger->enabled;
+
+    switch  (logger->log_id) 
+      {
+      case 1:
+	{
+	  // Multi Zone
+	  sprintf(source_fname, "%s-O-%08d.log", root_fname, logger->owner_id);
+	  sprintf(rotate_fname, "%s-O-%08d-%s.log", root_fname, logger->owner_id, buf);
+	  break;
+	}
+      case 2:
+	{
+	  // Single Zone
+	  sprintf(source_fname, "%s-Z-%08d.log", root_fname, logger->zone_id);
+	  sprintf(rotate_fname, "%s-Z-%08d-%s.log", root_fname, logger->zone_id, buf);
+	  break;
+	}
+      case 3:
+	{
+	  // Common
+	  sprintf(source_fname, "%s-00000000.log", root_fname);
+	  sprintf(rotate_fname, "%s-00000000-%s.log", root_fname, buf);
+	  break;
+	}
+      }
+
+    // See if we've processed this owner yet. 
+    HashKey* owner_key = new HashKey(source_fname);
+    DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(owner_key);
+    int* rotated_by = owners.Lookup(owner_key);
+
+    fprintf(stderr, "Processing logid=%d owner=%d zone=%d rotated=%p file=%p open_logger=%p\n", logger->log_id, logger->owner_id, logger->zone_id, rotated_by, logger->file, open_logger);
 
     FILE* newf = 0;
 
-    if (i > 0 || (SINGLE_DETAILS_LOG && i == 0)) {
+    // Rotate
+    if (logger->file != 0) {
 
-      if (logger->file != 0) {
+      fprintf(stderr, "  logger->file != 0\n");
+
+      if (rotated_by == NULL) {
+	fprintf(stderr, "  Flush & Close file=%p\n", logger->file);
 	logger->file->Flush();
 	logger->file->Close();
-	// fprintf(stderr, "Rotating %s => %s logger=%p cnt=%d\n", source_fname, rotate_fname, logger, logger->cnt);
+	fprintf(stderr, "  Rotating %s => %s logger=%p\n", source_fname, rotate_fname, logger);
 	newf = file_rotate(source_fname, rotate_fname);
-      } else {
-	if (logger->log_id != 0) {
-	  // fprintf(stderr, "Creating empty details for for %s\n", rotate_fname);
-	  FILE* f = fopen(rotate_fname, "wb");
-	  fclose(f);
+	
+	if (logger->log_id == 1) {
+	  // Remember the fact that we've already rotated for this Multi-Zone file
+	  owners.Insert(owner_key, new int(logger->zone_id));
 	}
+      } else {
+	fprintf(stderr, "  Ignoring %s, already rotated via zoneid=%d\n", source_fname, *rotated_by);
+	// Previous rotation will have cleaned this dangling pointer up. Ugly. :-(
+	logger->file = 0;
       }
-      
-      if (!terminating) {
-	if (logger->file != NULL) delete logger->file;
 
-	// Only reopen if we're still logging 
-	if (logger->log_id == 0) {
-	  logger->file = NULL;
-	  // fprintf(stderr, "Not opening logger file, now not logging for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
-	  unlink(source_fname);
-	} else {
-	  FILE* f = fopen(source_fname, "wb");
-	  // fprintf(stderr, "Opening new logger for %s %d %d source=%s\n", logger->fname, logger->owner_id, logger->log_id, source_fname);
-	  // TODO What if we can't open the file? Permissions, etc...
-	  logger->file = new BroFile(f);
-	}
+    } else if (logger->log_id == 3) {
+
+      if (!common_rotated) {
+	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
+	FILE* f = fopen(rotate_fname, "wb");
+	fclose(f);
+	common_rotated = true;
       } else {
-	unlink(source_fname);
+	fprintf(stderr, "  Common already rotated\n");
       }
+
+    } else if (logger->log_id == 2) {
+
+      // Single Zone
+      fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
+      FILE* f = fopen(rotate_fname, "wb");
+      fclose(f);
     }
-  }
+    else if (logger->log_id == 1) {
 
+      // Multi-Zone -- we may have already rotated. No need to create if that's the case.
+      if (rotated_by != NULL) {
+	fprintf(stderr, "  NOT creating empty details for %s, already rotated/created zoneid=%d\n", rotate_fname, *rotated_by);
+      } else {
+	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
+	FILE* f = fopen(rotate_fname, "wb");
+	fclose(f);
+	owners.Insert(owner_key, new int(logger->zone_id));
+      }
+
+    }
+      
+    if (!terminating) {
+      if (logger->file != NULL) {
+	delete logger->file;
+	logger->file = NULL;
+	HashKey* open_logger_key = new HashKey(source_fname);
+	DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
+	if (open_logger != NULL) {
+	  fprintf(stderr, "  Removing open logger info %s\n", source_fname);
+	  DETAIL_LOGGER_OPEN.Remove(open_logger_key);
+	}
+	delete open_logger_key;
+      }
+	
+      // Only reopen if we're still logging 
+      if (!enabled) {
+	logger->file = NULL;
+	fprintf(stderr, "  Not opening logger file, now not logging for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
+	unlink(source_fname);
+      } else {
+	if (logger->log_id == 2) {
+	  // TODO What if we can't open the file? Permissions, etc...
+	  FILE* f = fopen(source_fname, "wb");
+	  logger->file = new BroFile(f);
+	  fprintf(stderr, "  Opening new logger source=%s file=%p\n", source_fname, logger->file);
+	}
+      }
+    } else {
+      unlink(source_fname);
+    }
+
+    delete owner_key;
+  }
+  owners.Clear();
 }
 
 void __dns_telemetry_fire_owners(double ts) {
   if (dns_telemetry_owner_info) {
     
-    // fprintf(stderr, "fire_owners size=%d\n", OWNER_INFO.size);
+    int len = OWNER_INFO.Length();
+    if (len > 0) {
 
-    if (OWNER_INFO.size > 0) {
-      uint slots = sizeof(OWNER_INFO.owners)/sizeof(OwnerStats*);
-      for(uint i = 0; i < slots; i++) {
-	OwnerStats* stats = OWNER_INFO.owners[i];
-	if (stats != 0) {
-	  RecordVal* r = new RecordVal(dns_telemetry_owner_stats);
-	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
-	  r->Assign(1, new Val(stats->id, TYPE_COUNT));
-	  r->Assign(2, new Val(stats->cnt, TYPE_COUNT));
-	  val_list* vl = new val_list;
-	  vl->append(r);
-	  mgr.Dispatch(new Event(dns_telemetry_owner_info, vl), true);
-	  delete stats;
-	  OWNER_INFO.owners[i] = 0;
-	}
+      IterCookie* cookie = OWNER_INFO.InitForIteration();
+      HashKey* key;
+      OwnerStats* info;
+      while ((info = OWNER_INFO.NextEntry(key, cookie))) {
+	RecordVal* r = new RecordVal(dns_telemetry_owner_stats);
+	r->Assign(0, new Val(ts, TYPE_DOUBLE));
+	r->Assign(1, new Val(info->id, TYPE_COUNT));
+	r->Assign(2, new Val(info->cnt, TYPE_COUNT));
+	val_list* vl = new val_list;
+	vl->append(r);
+	mgr.Dispatch(new Event(dns_telemetry_owner_info, vl), true);
       }
-      OWNER_INFO.size = 0;
+      OWNER_INFO.Clear();
+
     } else {
       // Always emit an empty record for consistency and to ensure a file exists for the interval
       RecordVal* r = new RecordVal(dns_telemetry_owner_stats);
@@ -1121,17 +1257,17 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
       if (do_owner_stats && is_query) {
 
-	owner_stats = OWNER_INFO.owners[0];
+	HashKey* key = new HashKey((bro_int_t)0);
+	owner_stats = OWNER_INFO.Lookup(key);
+
 	if (owner_stats == 0) {
 	  owner_stats = new OwnerStats();
 	  owner_stats->id = 0;
 	  owner_stats->cnt = 0;
-	  OWNER_INFO.owners[0] = owner_stats;
-	  OWNER_INFO.size++;
-	  // fprintf(stderr, "Used slot %d for owner_id=%d (OTHER)\n", OWNER_INFO.size, 0);
+	  OWNER_INFO.Insert(key, owner_stats);
 	}
 	++owner_stats->cnt;
-
+	delete key;
       }
     } else {
 
@@ -1140,21 +1276,17 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	      
       if (do_owner_stats && is_query) {
 
-	// Experimenting on performance of dedicated Array. Just how big should it be?
-	// 100K default owners.
-
-	// Deal with the fact that we MAY end up with NEGATIVE owner_id (to represent common BADDOMAIN traffic that
-	// we want to start tracking individually. This is a FUTURE conern. PHIL - Mar 7 2014.
-	owner_stats = OWNER_INFO.owners[zinfo->owner_id];
+	HashKey* key = new HashKey((bro_int_t)zinfo->owner_id);
+	owner_stats = OWNER_INFO.Lookup(key);
 	if (owner_stats == 0) {
 	  owner_stats = new OwnerStats();
 	  owner_stats->id = zinfo->owner_id;
 	  owner_stats->cnt = 0;
-	  OWNER_INFO.owners[zinfo->owner_id] = owner_stats;
-	  OWNER_INFO.size++;
-	  // fprintf(stderr, "Used slot %d for owner_id=%d (%s)\n", OWNER_INFO.size, zinfo->owner_id, zinfo->key);
+	  HashKey* key = new HashKey((bro_int_t)zinfo->owner_id);
+	  OWNER_INFO.Insert(key, owner_stats);
 	}
 	++owner_stats->cnt;
+	// fprintf(stderr, "Used slot %d for owner_id=%d (%s) cnt=%d\n", OWNER_INFO.Length(), zinfo->owner_id, zinfo->key, owner_stats->cnt);
       }
 
     }
@@ -1382,42 +1514,93 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       // Determine which logger we should use
       DetailLogInfo* logger = 0;
       if (zinfo->log_id != 0) {
-	for (uint i = 0; i < DETAIL_LOGGER_INFO.size; i++) {
-	  DetailLogInfo* _logger = DETAIL_LOGGER_INFO.loggers[i];
-	  if (_logger->owner_id == zinfo->log_id) {
-	    logger = _logger;
-	    break;
-	  }
-	}
+
+	HashKey* log_key = new HashKey((bro_int_t)zinfo->zone_id);
+	logger = DETAIL_LOGGER_INFO.Lookup(log_key);
+
 	if (logger == 0) {
 	  fprintf(stderr, "WARN: Unexpected lack of DetailLogInfo config zone_id=%d owner_id=%d log_id=%d\n", zinfo->zone_id, zinfo->owner_id, zinfo->log_id);
 	  // Create new logger
 	  logger = new DetailLogInfo();
-	  logger->owner_id = zinfo->log_id;
+	  logger->owner_id = zinfo->owner_id;
 	  logger->log_id = zinfo->log_id;
 	  logger->ts = network_time;
+	  logger->enabled = true;
 	  // Use the base multi-tenant logger's root
-	  logger->fname = DETAIL_LOGGER_INFO.loggers[0]->fname;
-	  // Remember that we created this one.
-	  DETAIL_LOGGER_INFO.loggers[DETAIL_LOGGER_INFO.size++] = logger;
+	  logger->fname = DEFAULT_DETAILS;
+	  DETAIL_LOGGER_INFO.Insert(log_key, logger);
 	}
-      }
+	delete log_key;
 
-      if (logger == NULL) {
-	// Default to multi-tenant logger
-	logger = DETAIL_LOGGER_INFO.loggers[0];
-      }
-	    
-      if (logger->file == NULL) {
-	static char source_fname[256];
-	static char* root_fname = logger->fname;
-	sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
-	fprintf(stderr, "Creating logger %s\n", source_fname);
-	FILE* f = fopen(source_fname, "wb");
-	logger->file = new BroFile(f);
-      }
-      logger->file->Write(log_line, len);
+	// Switch to using the common logger if that's what's configured
+	if (logger->log_id == 3) {
+	  logger = NULL;
+	}
 
+	if (logger == NULL) {
+	  // Default to multi-tenant logger
+	  HashKey* log_key = new HashKey((bro_int_t)0);
+	  logger = DETAIL_LOGGER_INFO.Lookup(log_key);
+	  delete log_key;
+	}
+	
+	if (logger->file == NULL) {
+	  static char source_fname[256];
+	  static char* root_fname = logger->fname;
+	
+	  // sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
+
+	  switch (logger->log_id) 
+	    {
+	    case 1:
+	      {
+		// Multi Zone
+		sprintf(source_fname, "%s-O-%08d.log", root_fname, logger->owner_id);
+		break;
+	      }
+	    case 2:
+	      {
+		// Single Zone
+		sprintf(source_fname, "%s-Z-%08d.log", root_fname, logger->zone_id);
+		break;
+	      }
+	    case 3:
+	      {
+		// Common
+		sprintf(source_fname, "%s-00000000.log", root_fname);
+		break;
+	      }
+	    default:
+	      {
+		fprintf(stderr, "ERROR: Unexpected logid=%d name=%s tlz=%s\n", logger->log_id, name, tlz);
+		break;
+	      }
+	    }
+
+	  if (logger->log_id == 1) {
+	    // Determine if we've got an open logger for the source name. If so, use that.
+	    HashKey* open_logger_key = new HashKey(source_fname);
+	    DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
+	    if (open_logger) {
+	      fprintf(stderr, "Using existing logger %s logid=%d owner=%d my_zone=%d other_zone=%d\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, open_logger->zone_id);
+	      logger->file = open_logger->file;
+	    } else {
+	      FILE* f = fopen(source_fname, "wb");
+	      logger->file = new BroFile(f);
+	      DETAIL_LOGGER_OPEN.Insert(open_logger_key, logger);
+	      fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
+	    }
+	    delete open_logger_key;
+
+	  } else {
+	    FILE* f = fopen(source_fname, "wb");
+	    logger->file = new BroFile(f);
+	    fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
+	  }
+	}
+	// fprintf(stderr, "...%p %s", logger->file, log_line);
+	logger->file->Write(log_line, len);
+      }
     }
 
     if (do_counts) {

@@ -147,7 +147,6 @@ extern bool do_counts;
 extern bool do_totals;
 extern bool do_details;
 
-extern void set_index_type(uint);
 extern void set_do_details(bool enable, const char* fname);
 
 extern void __dns_telemetry_fire_counts(double ts);
@@ -261,12 +260,6 @@ function dns_telemetry_get_do_qnames%(%): bool
 function dns_telemetry_set_do_counts%(enable:bool%): any
 %{
 	do_counts = enable;
-	return 0;
-%}
-
-function dns_telemetry_set_index_type%(map_t:count%): any
-%{
-	set_index_type(map_t);
 	return 0;
 %}
 

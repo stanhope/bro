@@ -58,6 +58,7 @@ type ZoneInfo: record {
     ownid:int;
     logid:int;
     statid:int;
+    qnameid:int;
 };
 
 type ZoneIdx: record {
@@ -94,7 +95,7 @@ global path_log_pcaps = "/var/log/dyn/pcaps/trace";
 global path_config_dbind = "/etc/dbind/bro_dns_telemetry.cfg";
 global path_config_zones = "/etc/dbind/bro_zones.cfg";
 
-redef enum Log::ID += { ZONES, DETAILS, OWNERS, QNAMES, COUNTS, ANYRD, CLIENTS };
+redef enum Log::ID += { ZONES, OWNERS, QNAMES, COUNTS, ANYRD, CLIENTS };
 
 function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
 {
@@ -195,7 +196,7 @@ event Input::end_of_data(name: string, source: string)
 	for(key in zones_to_log) {
 	  local item:ZoneInfo = zones_to_log[key];
 	  # print item;
-   	  dns_telemetry_zone_info_add(item$name, item$zoneid, item$ownid, item$logid, item$statid);
+   	  dns_telemetry_zone_info_add(item$name, item$zoneid, item$ownid, item$logid, item$statid, item$qnameid);
 	}
 	# dns_telemetry_zone_info_list();
 
@@ -283,7 +284,7 @@ event dns_telemetry_owner_info(info:dns_telemetry_owner_stats) {
 }
 
 event dns_telemetry_qname_info(info:dns_telemetry_qname_stats) {
-  print fmt("event.dns_telemetry_qname %s", info);
+#  print fmt("event.dns_telemetry_qname %s", info);
   Log::write_at(info$ts, DBIND9::QNAMES, info);
 }
 

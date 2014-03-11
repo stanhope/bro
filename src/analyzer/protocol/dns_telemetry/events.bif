@@ -158,14 +158,14 @@ extern void __dns_telemetry_fire_zones(double ts);
 extern void __dns_telemetry_fire_owners(double ts);
 extern void __dns_telemetry_fire_qnames(double ts);
 extern void __dns_telemetry_fire_details(double ts, bool terminating);
-extern void __dns_telemetry_zone_info_add(StringVal* name, int zoneid, int custid, int logid, int statid);
+extern void __dns_telemetry_zone_info_add(StringVal* name, int zoneid, int custid, int logid, int statid, int qnameid);
 extern void __dns_telemetry_zone_info_list();
 
 %%}
 
-function dns_telemetry_zone_info_add%(name:string, zoneid:int, custid:int, logid:int, statid:int%):any
+function dns_telemetry_zone_info_add%(name:string, zoneid:int, custid:int, logid:int, statid:int, qnameid:int%):any
 %{
-	__dns_telemetry_zone_info_add(name, zoneid, custid, logid, statid);
+	__dns_telemetry_zone_info_add(name, zoneid, custid, logid, statid, qnameid);
 	return 0;
 %}
 

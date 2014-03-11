@@ -1,5 +1,13 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
+// TODOs
+//
+// 1) Implement per zone qname reporting. The current implementation will enable for ALL qnames. This is way to expensive.
+// 2) Implement per zone COUNT telemetry. The current implementation is global (aggregate) counts used for operational purposes.
+//
+//    A possible solution to this is to stop all use of the BRO logging framework and leverage the capability do high-volume
+//    details logging.
+
 #include "config.h"
 
 #include <ctype.h>
@@ -157,22 +165,23 @@ PDict(QnameStats) telemetry_qname_stats;
 PDict(ZoneStats) telemetry_zone_stats;
 PDict(ZoneInfo) telemetry_zone_info;
 
-struct LogInfo {
+struct DetailLogInfo {
   double ts;
   int owner_id;
   int log_id;
+  int zone_id;
   uint cnt;
   PDict(int) zones;
   char* fname;
   BroFile* file;
 };
 
-struct LoggerInfo {
-  LogInfo* loggers[100000];
+struct DetailLoggerInfo {
+  DetailLogInfo* loggers[100000];
   uint size = 0;
 };
 
-LoggerInfo LOGGER_INFO;
+DetailLoggerInfo DETAIL_LOGGER_INFO;
 
 uint MAP_TYPE = 0;
 
@@ -196,13 +205,13 @@ void set_do_details(bool enable, const char* fname) {
   // strcpy(DETAILS_FILE_NAME, fname);
   do_details = enable;
 
-  LogInfo* logger;
-  if (LOGGER_INFO.size == 0) {
-    logger = new LogInfo();
-    LOGGER_INFO.loggers[0] = logger;
-    ++LOGGER_INFO.size;
+  DetailLogInfo* logger;
+  if (DETAIL_LOGGER_INFO.size == 0) {
+    logger = new DetailLogInfo();
+    DETAIL_LOGGER_INFO.loggers[0] = logger;
+    ++DETAIL_LOGGER_INFO.size;
   } else {
-    logger = LOGGER_INFO.loggers[0];
+    logger = DETAIL_LOGGER_INFO.loggers[0];
   }
 
   logger->fname = (char*)malloc(256);
@@ -328,6 +337,8 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 		return 0;
 		}
 
+	/*
+
 	if ( ! ParseAnswers(&msg, msg.ancount, DNS_ANSWER,
 				data, len, msg_start) )
 		{
@@ -335,8 +346,11 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 		return 0;
 		}
 
+	*/
+
 	analyzer->ProtocolConfirmation();
 
+	/*
 	AddrVal server(analyzer->Conn()->RespAddr());
 
 	int skip_auth = dns_skip_all_auth;
@@ -380,11 +394,13 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 		}
 
 	EndMessage(&msg);
+	*/
 	return 1;
 	}
 
 int DNS_Telemetry_Interpreter::EndMessage(DNS_Telemetry_MsgInfo* msg)
 	{
+	  fprintf(stderr, "EndMessage\n");
 	  return 1;
 	}
 
@@ -422,8 +438,9 @@ int DNS_Telemetry_Interpreter::ParseAnswers(DNS_Telemetry_MsgInfo* msg, int n, D
 	return n == 0;
 	}
 
-void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, int logid, int statid) {
+void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, int logid, int statid, int qnameid) {
 
+  // TODO: Implement QNAME logging. The current implementation
   const char* zname = name->CheckString();
   HashKey* zone_hash = new HashKey(zname);
   ZoneInfo* zinfo = telemetry_zone_info.Lookup(zone_hash);
@@ -438,16 +455,15 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
   zinfo->stat_id = statid;
   zinfo->details = logid != 0;
 
-  fprintf(stderr, "\nzone_info_add %s zid=%d oid=%d lid=%d sid=%d\n", zname, zone_id, owner_id, logid, statid);
+  // fprintf(stderr, "\nzone_info_add %s zid=%d oid=%d lid=%d sid=%d\n", zname, zone_id, owner_id, logid, statid);
 
   // See if we've got a logger for this
   // Naive search first.
-  LogInfo* logger = NULL;
-  for (uint i = 0; i < LOGGER_INFO.size; i++) {
-    LogInfo* tmp = LOGGER_INFO.loggers[i];
+  DetailLogInfo* logger = NULL;
+  for (uint i = 0; i < DETAIL_LOGGER_INFO.size; i++) {
+    DetailLogInfo* tmp = DETAIL_LOGGER_INFO.loggers[i];
     if (tmp->owner_id == zinfo->owner_id) {
       logger = tmp;
-      fprintf(stderr, "..found logger for %d %p\n", zinfo->owner_id, tmp);
       break;
     }
   }
@@ -457,15 +473,11 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
   if (logger) {
     // Update the logid. Could be toggling details on/off for a particular customer
     // Owner ID can't / shouldn't change. Nor the location that we write these logs to.
-    fprintf(stderr, "..existing logger, old log_id=%d new=%d cnt=%u %p\n", logger->log_id, logid, logger->cnt, logger);
     if (logid != 0) {
       // Multiple zones being logged
       // Only bump if this is a zone that we're not already logging for.
       HashKey* key = new HashKey((bro_int_t)zone_id);
-      if (logger->zones.Lookup(key)) {
-	fprintf(stderr,"..already logging");
-      } else {
-	fprintf(stderr, "..new zone to log\n");
+      if (!logger->zones.Lookup(key)) {
 	logger->zones.Insert(key, new int(zone_id));
 	logger->cnt++;
       }
@@ -476,13 +488,11 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
 	if (logger->zones.Lookup(key)) {
 	  logger->zones.Remove(key);
 	  logger->cnt--;
-	  fprintf(stderr, "..stopping logging cnt=%d\n", logger->cnt);
+	  // fprintf(stderr, "..stopping logging cnt=%d\n", logger->cnt);
 	  if (logger->cnt == 0) {
 	    // Last remaining zone being logged
 	    logger->log_id = 0;
 	  }
-	} else {
-	  fprintf(stderr, "..ignoring, not logging\n");
 	}
 	delete key;
       } else if (logger->cnt > 1) {
@@ -498,20 +508,20 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
 
     // If we don't have a logger info yet, create it.
     if (logger == NULL) {
-      // Create and init a LogInfo structure
-      logger = new LogInfo();
+      // Create and init a DetailLogInfo structure
+      logger = new DetailLogInfo();
       logger->owner_id = zinfo->log_id;
       logger->log_id = zinfo->log_id;
+      logger->zone_id = zinfo->zone_id;
       logger->ts = network_time;
       logger->cnt = 1;
       HashKey* key = new HashKey((bro_int_t)zone_id);
       logger->zones.Insert(key, new int(zone_id));
       delete key;
-      fprintf(stderr, "..creating logger for %s owner_id=%d log_id=%d size=%d %p\n", zname, zinfo->owner_id, zinfo->log_id, LOGGER_INFO.size, logger);
       // Use the base multi-tenant logger's root
-      logger->fname = LOGGER_INFO.loggers[0]->fname;
+      logger->fname = DETAIL_LOGGER_INFO.loggers[0]->fname;
       // Remember that we created this one.
-      LOGGER_INFO.loggers[LOGGER_INFO.size++] = logger;
+      DETAIL_LOGGER_INFO.loggers[DETAIL_LOGGER_INFO.size++] = logger;
     }
   }
 }
@@ -757,6 +767,45 @@ void __dns_telemetry_fire_clients(double ts) {
   }
 }
 
+FILE* file_rotate(const char* name, const char* to_name)
+{
+  // Build file names.
+  const int buflen = strlen(name) + 128;
+  char tmpname[buflen], newname[buflen+4];
+  safe_snprintf(newname, buflen, "%s", to_name);
+  newname[buflen-1] = '\0';
+  strcpy(tmpname, newname);
+  strcat(tmpname, ".tmp");
+
+  // First open the new file using a temporary name.
+  FILE* newf = fopen(tmpname, "w");
+  if ( ! newf ) {
+    fprintf(stderr, "file_rotate: can't open %s: %s", tmpname, strerror(errno));
+    return 0;
+  }
+
+  // Then move old file to and make sure it really gets created.
+  struct stat dummy;
+  if ( link(name, newname) < 0 || stat(newname, &dummy) < 0 ) {
+    fprintf(stderr, "file_rotate: can't move %s to %s: %s", name, newname, strerror(errno));
+    fclose(newf);
+    unlink(newname);
+    unlink(tmpname);
+    return 0;
+  }
+
+  // Close current file, and move the tmp to its place.
+  if ( unlink(name) < 0 || link(tmpname, name) < 0 || unlink(tmpname) < 0 ) {
+    reporter->Error("file_rotate: can't move %s to %s: %s", tmpname, name, strerror(errno));
+    exit(1);	// hard to fix, but shouldn't happen anyway...
+  }
+
+  fclose(newf);
+  return 0;
+  // return newf;
+}
+
+
 void __dns_telemetry_fire_details(double ts, bool terminating) {
 
   // How we deal with synchronous, manual rotation.
@@ -767,24 +816,26 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
   time_t time = (time_t) ts-59;; // ugly. We're getting called @ the 59'th
   strftime(buf, sizeof(buf), "%y-%m-%d_%H.%M.%S", localtime(&time));
 
-  for (uint i = 0; i < LOGGER_INFO.size; i++) {
+  for (uint i = 0; i < DETAIL_LOGGER_INFO.size; i++) {
 
-    LogInfo* logger = LOGGER_INFO.loggers[i];
+    DetailLogInfo* logger = DETAIL_LOGGER_INFO.loggers[i];
 
     char* root_fname = logger->fname;
     sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
     sprintf(rotate_fname, "%s-%08d-%s.log", root_fname, logger->owner_id, buf);
+
+    FILE* newf = 0;
 
     if (i > 0 || (SINGLE_DETAILS_LOG && i == 0)) {
 
       if (logger->file != 0) {
 	logger->file->Flush();
 	logger->file->Close();
-	fprintf(stderr, "Rotating %s => %s logger=%p cnt=%d\n", source_fname, rotate_fname, logger, logger->cnt);
-	rotate_file_to_name(source_fname, rotate_fname, 0);
+	// fprintf(stderr, "Rotating %s => %s logger=%p cnt=%d\n", source_fname, rotate_fname, logger, logger->cnt);
+	newf = file_rotate(source_fname, rotate_fname);
       } else {
 	if (logger->log_id != 0) {
-	  fprintf(stderr, "Creating empty details for for %s\n", rotate_fname);
+	  // fprintf(stderr, "Creating empty details for for %s\n", rotate_fname);
 	  FILE* f = fopen(rotate_fname, "wb");
 	  fclose(f);
 	}
@@ -796,11 +847,11 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 	// Only reopen if we're still logging 
 	if (logger->log_id == 0) {
 	  logger->file = NULL;
-	  fprintf(stderr, "Not opening logger file, now not logging for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
+	  // fprintf(stderr, "Not opening logger file, now not logging for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
 	  unlink(source_fname);
 	} else {
-	  fprintf(stderr, "Opening new logger for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
 	  FILE* f = fopen(source_fname, "wb");
+	  // fprintf(stderr, "Opening new logger for %s %d %d source=%s\n", logger->fname, logger->owner_id, logger->log_id, source_fname);
 	  // TODO What if we can't open the file? Permissions, etc...
 	  logger->file = new BroFile(f);
 	}
@@ -815,7 +866,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 void __dns_telemetry_fire_owners(double ts) {
   if (dns_telemetry_owner_info) {
     
-    fprintf(stderr, "fire_owners size=%d\n", OWNER_INFO.size);
+    // fprintf(stderr, "fire_owners size=%d\n", OWNER_INFO.size);
 
     if (OWNER_INFO.size > 0) {
       uint slots = sizeof(OWNER_INFO.owners)/sizeof(OwnerStats*);
@@ -998,8 +1049,6 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   u_char name[513];
   int name_len = sizeof(name) - 1;
 
-  char key_host [255];
-  char key_zone [255];
   char tlz [255];
   u_char* name_end;
 
@@ -1028,7 +1077,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   // ExtractName performs this work while decoding the raw labels in the DNS packet.
   //
 
-  name_end = ExtractName(data, len, name, name_len, msg_start, key_host, key_zone, tlz);
+  name_end = ExtractName(data, len, name, name_len, msg_start, tlz);
 
   if ( ! name_end )
     return 0;
@@ -1048,12 +1097,12 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
   if (do_zone_stats && dns_telemetry_zone_info) {
 
-    zv = telemetry_zone_stats.Lookup(zone_hash);
     zinfo = telemetry_zone_info.Lookup(zone_hash);
 	    
     if (!zinfo) {
+      
       // We don't know about this zone. See if we've already got an OTHER bucket.
-      const char other[6] = "OTHER";
+      const char other[] = "OTHER";
       HashKey* other_hash = new HashKey(other);
       zv = telemetry_zone_stats.Lookup(other_hash);
       // Get rid of the orignal hash and use the new one.
@@ -1076,6 +1125,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       }
     } else {
 
+      zv = telemetry_zone_stats.Lookup(zone_hash);
       do_zone_details = zinfo->details;
 	      
       if (do_owner_stats && is_query) {
@@ -1116,7 +1166,6 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	zv->zone_id = 0;
 	zv->owner_id = 0;
       }
-
       telemetry_zone_stats.Insert(zone_hash, zv);
     }
   }
@@ -1135,6 +1184,10 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       ++qname_stat->cnt;
     }
     delete qname_hash;
+    if (zinfo) {
+      qname_stat->zone_id = zinfo->zone_id;
+      qname_stat->owner_id = zinfo->owner_id;
+    }
   }
 
   if ( msg->QR == 0 ) {
@@ -1299,6 +1352,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       ++zv->REFUSED;
   }
   else {
+
     dns_event = dns_telemetry_query_reply;
 
     if (do_details && do_zone_details) {
@@ -1316,32 +1370,32 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       log_line[len] = 0;
 
       // Determine which logger we should use
-      LogInfo* logger = 0;
+      DetailLogInfo* logger = 0;
       if (zinfo->log_id != 0) {
-	for (uint i = 0; i < LOGGER_INFO.size; i++) {
-	  LogInfo* _logger = LOGGER_INFO.loggers[i];
+	for (uint i = 0; i < DETAIL_LOGGER_INFO.size; i++) {
+	  DetailLogInfo* _logger = DETAIL_LOGGER_INFO.loggers[i];
 	  if (_logger->owner_id == zinfo->log_id) {
 	    logger = _logger;
 	    break;
 	  }
 	}
 	if (logger == 0) {
-	  fprintf(stderr, "WARN: Unexpected lack of LogInfo config zone_id=%d owner_id=%d log_id=%d\n", zinfo->zone_id, zinfo->owner_id, zinfo->log_id);
+	  fprintf(stderr, "WARN: Unexpected lack of DetailLogInfo config zone_id=%d owner_id=%d log_id=%d\n", zinfo->zone_id, zinfo->owner_id, zinfo->log_id);
 	  // Create new logger
-	  logger = new LogInfo();
+	  logger = new DetailLogInfo();
 	  logger->owner_id = zinfo->log_id;
 	  logger->log_id = zinfo->log_id;
 	  logger->ts = network_time;
 	  // Use the base multi-tenant logger's root
-	  logger->fname = LOGGER_INFO.loggers[0]->fname;
+	  logger->fname = DETAIL_LOGGER_INFO.loggers[0]->fname;
 	  // Remember that we created this one.
-	  LOGGER_INFO.loggers[LOGGER_INFO.size++] = logger;
+	  DETAIL_LOGGER_INFO.loggers[DETAIL_LOGGER_INFO.size++] = logger;
 	}
       }
 
       if (logger == NULL) {
 	// Default to multi-tenant logger
-	logger = LOGGER_INFO.loggers[0];
+	logger = DETAIL_LOGGER_INFO.loggers[0];
       }
 	    
       if (logger->file == NULL) {
@@ -1390,6 +1444,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case DNS_CODE_REFUSED:
 	  ++CNTS.rcode_refused;
 	  ++TOTALS.rcode_refused;
+	  fprintf(stderr, "REFUSED\n");
 	  if (do_zone_stats)
 	    ++zv->REFUSED;
 	  break;
@@ -1397,6 +1452,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     }
   }
 
+  
   if ( dns_event && ! msg->skip_event )
     {
       BroString* question_name =
@@ -1421,9 +1477,10 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
+	fprintf(stderr, "ParseAnswer len=%d\n", len);
 	return 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0);
 	if ( ! name_end )
 		return 0;
 
@@ -1519,103 +1576,74 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 
 
 u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
-					u_char* name, int name_len,
-					       const u_char* msg_start, char* key_host, char* key_zone, char* tlz)
+					       u_char* name, int name_len, const u_char* msg_start,
+					       char* tlz)
+{
+  u_char* name_start = name;
+
+  int label_cnt = 0;
+  int label_idx[64];
+
+  while (true) {
+    int result = ExtractLabel(data, len, name, name_len, msg_start);
+    if (!result) {
+      break;
+    } else {
+      label_idx[label_cnt++] = result;
+    }
+  } 
+
+  int n = name - name_start;
+
+  if ( n >= 255 )
+    analyzer->Weird("DNS_NAME_too_long");
+
+  if ( n >= 2 && name[-1] == '.' )
+    {
+      // Remove trailing dot.
+      --name;
+      name[0] = 0;
+    }
+
+  // Convert labels to lower case for consistency.
+  for ( u_char* np = name_start; np < name; ++np )
+    if ( isupper(*np) )
+      *np = tolower(*np);
+
+  if (tlz != NULL) {
+    // Now determine what the longest path match is...
+    // Look for the host name in the zone map
+    const char *pSearch = (const char*)name_start;
+    const char *pDelim = ::strrchr(pSearch, '.');
+    bool match = false;
+    if (!pDelim) {
+      // not good, ignore
+    } else {
+      do
 	{
-	u_char* name_start = name;
-
-	int label_cnt = 0;
-	int label_idx[64];
-
-	while (true) {
-	  int result = ExtractLabel(data, len, name, name_len, msg_start);
-	  if (!result) {
+	  HashKey *key = new HashKey(pSearch);
+	  ZoneInfo* zinfo = telemetry_zone_info.Lookup(key);
+	  if (zinfo != 0) {
+	    // We're done.
+	    match = true;
+	    strcpy(tlz, pSearch);
+	    delete key;
 	    break;
 	  } else {
-	    label_idx[label_cnt++] = result;
+	    delete key;
+	    pSearch = ::strchr(pSearch, '.');
 	  }
-	} 
-
-	int n = name - name_start;
-
-	if ( n >= 255 )
-		analyzer->Weird("DNS_NAME_too_long");
-
-	if ( n >= 2 && name[-1] == '.' )
-		{
-		// Remove trailing dot.
-		--name;
-		name[0] = 0;
-		}
-
-	// Convert labels to lower case for consistency.
-	for ( u_char* np = name_start; np < name; ++np )
-		if ( isupper(*np) )
-			*np = tolower(*np);
-
-	if (key_host) {
-	  int key_len = 0;
-	  int label_start = n;
-	  int label_processed = 0;
-	  int label_tlz = 0; // Need to calculate this based on # of labels for the suffix (.com, .co.uk, etc)
-	  int label_max_idx = label_cnt - 1;
-
-	  key_host[0] = 0;
-	  key_zone[0] = 0;
-	  tlz[0] = 0;
-	  int label_zones = 0;
-
-	  for (int i = label_max_idx; i >= 0; i--) {
-	    int label_len = label_idx[i];
-	    label_start -= (label_len+1);
-	    char label[64];
-	    memcpy(label, name_start+label_start, label_len);
-	    label[label_len] = 0;
-
-	    // If we've not yet figured out what the TLZ is, do so.
-	    if (label_tlz == 0) {
-	      if (i == label_max_idx) {
-		// TODO: build entire list of single-label suffixes for TLDs
-		if (strstr("arpa",label)) {
-		  strcpy(key_host, "OTHER");
-		  strcpy(key_zone, "OTHER");
-		  strcpy(tlz, "OTHER");
-		  return name;
-		}
-		else if (strstr("comnetorginfo",label)) {
-		  label_tlz = 2;
-		}	
-	      } else if (i == label_max_idx-1) {
-		fprintf(stderr, "TODO: build and check for two-label suffixes for TLDs qname=%s label_cnt=%d\n", name, label_cnt);
-	      } else {
-		fprintf(stderr, "TODO: build and check for multi-label suffixes for TLDs qname=%s label_cnt=%d\n", name, label_cnt);
-	      }
-	    }
-
-	    // Build up the host key. It will contain only the labels (no periods).
-	    key_len += label_len;
-	    strcat(key_host,label);
-
-
-	    // Build up the zone key. It will contain only the labels (no periods).
-	    if (label_zones < label_tlz) {
-	      strcat(key_zone, label);
-	      label_zones++;
-	    }
-
-	  }
-
-	  // Determine how many chars to strip from the beginning of the qname to leave the remaining TLZ in original order
-	  int skip_chars = 0;
-	  for (int i = 0; i < label_cnt - label_tlz; i++) {
-	    skip_chars += (label_idx[i]+1);
-	  }
-	  strcpy(tlz, (char*)name_start+skip_chars);
-	  // fprintf(stderr, "::ExtractName qname=%s len=%d label_cnt=%d key_host=%s key_zone=%s tlz_labels=%d tlz=%s\n",name_start, n, label_cnt, key_host, key_zone, label_tlz,tlz);
 	}
+      while(pSearch && ++pSearch < pDelim);
+    }
+    if (!match) {
+      strcpy(tlz, "OTHER");
+    }
+    // fprintf(stderr, "::ExtractName qname=%s len=%d tlz=%s\n", name_start, n, tlz);
+  }
 
-	return name;
-	}
+  return name;
+}
 
 int DNS_Telemetry_Interpreter::ExtractLabel(const u_char*& data, int& len,
 				u_char*& name, int& name_len,
@@ -1664,7 +1692,7 @@ int DNS_Telemetry_Interpreter::ExtractLabel(const u_char*& data, int& len,
 		const u_char* recurse_data = msg_start + offset;
 		int recurse_max_len = orig_data - recurse_data;
 
-		u_char* name_end = ExtractName(recurse_data, recurse_max_len, name, name_len, msg_start, 0, 0, 0);
+		u_char* name_end = ExtractName(recurse_data, recurse_max_len, name, name_len, msg_start,0);
 
 		name_len -= name_end - name;
 		name = name_end;
@@ -1751,7 +1779,7 @@ int DNS_Telemetry_Interpreter::ParseRR_Name(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0);
 	if ( ! name_end )
 		return 0;
 
@@ -1811,14 +1839,14 @@ int DNS_Telemetry_Interpreter::ParseRR_SOA(DNS_Telemetry_MsgInfo* msg,
 	u_char mname[513];
 	int mname_len = sizeof(mname) - 1;
 
-	u_char* mname_end = ExtractName(data, len, mname, mname_len, msg_start, 0, 0, 0);
+	u_char* mname_end = ExtractName(data, len, mname, mname_len, msg_start, 0);
 	if ( ! mname_end )
 		return 0;
 
 	u_char rname[513];
 	int rname_len = sizeof(rname) - 1;
 
-	u_char* rname_end = ExtractName(data, len, rname, rname_len, msg_start, 0, 0, 0);
+	u_char* rname_end = ExtractName(data, len, rname, rname_len, msg_start, 0);
 	if ( ! rname_end )
 		return 0;
 
@@ -1848,7 +1876,7 @@ int DNS_Telemetry_Interpreter::ParseRR_MX(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0);
 	if ( ! name_end )
 		return 0;
 
@@ -1880,7 +1908,7 @@ int DNS_Telemetry_Interpreter::ParseRR_SRV(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0, 0);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0);
 	if ( ! name_end )
 		return 0;
 	*name_end = 0;	// terminate name so we can use it in snprintf()
@@ -1936,7 +1964,7 @@ int DNS_Telemetry_Interpreter::ParseRR_TSIG(DNS_Telemetry_MsgInfo* msg,
 	const u_char* data_start = data;
 	u_char alg_name[1024];
 	int alg_name_len = sizeof(alg_name) - 1;
-	u_char* alg_name_end = ExtractName(data, len, alg_name, alg_name_len, msg_start, 0, 0, 0);
+	u_char* alg_name_end = ExtractName(data, len, alg_name, alg_name_len, msg_start,0);
 
 	if ( ! alg_name_end )
 		return 0;
@@ -2322,38 +2350,39 @@ void DNS_Telemetry_Analyzer::Init()
 	}
 
 void DNS_Telemetry_Analyzer::Done()
-	{
-	tcp::TCP_ApplicationAnalyzer::Done();
-	if ( Conn()->ConnTransport() == TRANSPORT_UDP && ! did_session_done )
-		Event(udp_session_done);
-	else
-		interp->Timeout();
-	}
+{
+  tcp::TCP_ApplicationAnalyzer::Done();
+  if ( Conn()->ConnTransport() == TRANSPORT_UDP && ! did_session_done )
+    Event(udp_session_done);
+  else
+    interp->Timeout();
+}
 
 void DNS_Telemetry_Analyzer::DeliverPacket(int len, const u_char* data, bool orig,
 					int seq, const IP_Hdr* ip, int caplen)
-	{
-	tcp::TCP_ApplicationAnalyzer::DeliverPacket(len, data, orig, seq, ip, caplen);
-	if ( orig )
-		{
-		  if ( ! interp->ParseMessage(data, len, 1)) {
-		    if (do_counts) {
-		      ++CNTS.non_dns_request;
-		      ++TOTALS.non_dns_request;
-		    }
-		      if (non_dns_telemetry_request )
-			{
-			val_list* vl = new val_list;
-			vl->append(BuildConnVal());
-			vl->append(new StringVal(len, (const char*) data));
-			ConnectionEvent(non_dns_telemetry_request, vl);
-			}
-		    }
-		}
-
-	else
-		interp->ParseMessage(data, len, 0);
+{
+  tcp::TCP_ApplicationAnalyzer::DeliverPacket(len, data, orig, seq, ip, caplen);
+  if ( orig )
+    {
+      if ( ! interp->ParseMessage(data, len, 1)) {
+	if (do_counts) {
+	  ++CNTS.non_dns_request;
+	  ++TOTALS.non_dns_request;
 	}
+	if (non_dns_telemetry_request )
+	  {
+	    val_list* vl = new val_list;
+	    vl->append(BuildConnVal());
+	    vl->append(new StringVal(len, (const char*) data));
+	    ConnectionEvent(non_dns_telemetry_request, vl);
+	  }
+      }
+    }
+
+  else {
+    interp->ParseMessage(data, len, 0);
+  }
+}
 
 
 void DNS_Telemetry_Analyzer::ConnectionClosed(tcp::TCP_Endpoint* endpoint, tcp::TCP_Endpoint* peer,

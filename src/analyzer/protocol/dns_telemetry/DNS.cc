@@ -422,99 +422,6 @@ int DNS_Telemetry_Interpreter::ParseAnswers(DNS_Telemetry_MsgInfo* msg, int n, D
 	return n == 0;
 	}
 
-/*
-void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, int logid, int statid, int qnameid) {
-
-  // TODO: Implement QNAME logging. The current implementation
-  const char* zname = name->CheckString();
-  HashKey* zone_hash = new HashKey(zname);
-  ZoneInfo* zinfo = telemetry_zone_info.Lookup(zone_hash);
-  if (!zinfo) {
-    zinfo = new ZoneInfo();
-    telemetry_zone_info.Insert(zone_hash, zinfo);
-  }
-  strcpy(zinfo->key, zname);
-  zinfo->zone_id = zone_id;
-  zinfo->owner_id = owner_id;
-  zinfo->log_id = logid;
-  zinfo->stat_id = statid;
-  zinfo->details = logid != 0;
-
-  if (logid != 0 && logid != owner_id) {
-    fprintf(stderr, "ERROR: log_id must be either 0 or the owner_id logid=%d owner_id=%d zone_id=%d %s\n", logid, owner_id, zone_id, zname);
-    return;
-  }
-
-  if (logid != 0)
-    fprintf(stderr, "zone_info_add %s zid=%d oid=%d lid=%d sid=%d\n", zname, zone_id, owner_id, logid, statid);
-
-  DetailLogInfo* logger = NULL;
-  HashKey* logger_key = new HashKey((bro_int_t)zinfo->owner_id);
-  logger = DETAIL_LOGGER_INFO.Lookup(logger_key);
-  delete logger_key;
-
-  if (logger) {
-
-    // Update the logid. Could be toggling details on/off for a particular customer
-    // Owner ID can't / shouldn't change. Nor the location that we write these logs to.
-    if (logid != 0) {
-
-      // Multiple zones being logged
-      // Only bump if this is a zone that we're not already logging for.
-      HashKey* key = new HashKey((bro_int_t)zone_id);
-      if (!logger->zones.Lookup(key)) {
-	logger->zones.Insert(key, new int(zone_id));
-	logger->cnt++;
-      }
-      delete key;
-
-    } else {
-      if (logger->cnt >= 1) {
-	HashKey* key = new HashKey((bro_int_t)zone_id);
-	if (logger->zones.Lookup(key)) {
-	  logger->zones.Remove(key);
-	  logger->cnt--;
-	  // fprintf(stderr, "..stopping logging cnt=%d\n", logger->cnt);
-	  if (logger->cnt == 0) {
-	    // Last remaining zone being logged
-	    logger->log_id = 0;
-	  }
-	}
-	delete key;
-      } else if (logger->cnt > 1) {
-	// Leave the log_id non-zero, indicates that we're continuing to log for at least one zone
-      } else {
-	// Already zero. log_id being zero means we've stopped logging. The file 
-	// will be rotated but no further logging will occur after the rotation until
-	// the zone logging is enabled again. The logger data structure will survive in memory
-	// however.
-      }
-    }
-
-  } else if (logid != 0) {
-
-    // If we don't have a logger info yet, create it.
-    if (logger == NULL) {
-      // Create and init a DetailLogInfo structure
-      logger = new DetailLogInfo();
-      logger->owner_id = zinfo->log_id;
-      logger->log_id = zinfo->log_id;
-      logger->zone_id = zinfo->zone_id;
-      logger->ts = network_time;
-      logger->cnt = 1;
-      HashKey* key = new HashKey((bro_int_t)zone_id);
-      logger->zones.Insert(key, new int(zone_id));
-      delete key;
-      // Use the base multi-tenant logger's root
-      logger->fname = DEFAULT_DETAILS;
-      HashKey* log_key = new HashKey((bro_int_t)zinfo->owner_id);
-      DETAIL_LOGGER_INFO.Insert(log_key, logger);
-      delete log_key;
-    }
-  }
-}
-*/
-
 void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, int logid, int statid, int qnameid) {
 
   // TODO: Implement QNAME logging.
@@ -540,7 +447,7 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
   }
 
   if (logid != 0) 
-    fprintf(stderr, "zone_info_ad\t%s\tzid=%d\toid=%d\tlid=%d\tsid=%d\n", zname, zone_id, owner_id, logid, statid);
+    fprintf(stderr, "zone_info_add\t%s\tzid=%d\toid=%d\tlid=%d\tsid=%d\n", zname, zone_id, owner_id, logid, statid);
 
   DetailLogInfo* logger = NULL;
   HashKey* logger_key = new HashKey((bro_int_t)zinfo->zone_id);
@@ -551,6 +458,9 @@ void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, i
 
     // Update the logid. Could be toggling details on/off for a particular customer
     // Owner ID can't / shouldn't change. Nor the location that we write these logs to.
+    if (logger->log_id != 0) {
+      fprintf(stderr, "zone_info_add\t%s\tdisabling logging (was %d)\n", zname, logger->log_id);
+    }
     logger->log_id = logid;
     logger->enabled = false;
 
@@ -594,7 +504,7 @@ void __dns_telemetry_zone_info_list() {
   IterCookie* c = telemetry_zone_info.InitForIteration();
   HashKey* k;
   ZoneInfo* val;
-  fprintf(stderr,"Zone Info len=%d loggers=%d\n", telemetry_zone_info.Length(), DETAIL_LOGGER_INFO.Length());
+  fprintf(stderr,"Config @ %f - Zone Info len=%d loggers=%d\n", current_time(),telemetry_zone_info.Length(), DETAIL_LOGGER_INFO.Length());
 }
 
 void __dns_telemetry_fire_counts(double ts) {
@@ -863,6 +773,7 @@ FILE* file_rotate(const char* name, const char* to_name)
   // return newf;
 }
 
+// #define ROTATE_LOGGING 
 
 void __dns_telemetry_fire_details(double ts, bool terminating) {
 
@@ -918,47 +829,61 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
     DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(owner_key);
     int* rotated_by = owners.Lookup(owner_key);
 
+#ifdef ROTATE_LOGGING
     fprintf(stderr, "Processing logid=%d owner=%d zone=%d rotated=%p file=%p open_logger=%p\n", logger->log_id, logger->owner_id, logger->zone_id, rotated_by, logger->file, open_logger);
+#endif
 
     FILE* newf = 0;
 
     // Rotate
     if (logger->file != 0) {
 
-      fprintf(stderr, "  logger->file != 0\n");
-
       if (rotated_by == NULL) {
-	fprintf(stderr, "  Flush & Close file=%p\n", logger->file);
 	logger->file->Flush();
 	logger->file->Close();
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  Rotating %s => %s logger=%p\n", source_fname, rotate_fname, logger);
+#endif
 	newf = file_rotate(source_fname, rotate_fname);
 	
 	if (logger->log_id == 1) {
 	  // Remember the fact that we've already rotated for this Multi-Zone file
 	  owners.Insert(owner_key, new int(logger->zone_id));
+	} else if (logger->log_id == 3) {
+	  // Remember the fact that we've already rotated for the Multi-Customer/Zone (Common) file
+	  common_rotated = true;
 	}
       } else {
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  Ignoring %s, already rotated via zoneid=%d\n", source_fname, *rotated_by);
+#endif
 	// Previous rotation will have cleaned this dangling pointer up. Ugly. :-(
 	logger->file = 0;
       }
 
     } else if (logger->log_id == 3) {
 
+      // No open file. Creating empty Common details. 
+      // TODO: Consider tracking the number of active zones being common logged. If > 1 then create empty.
       if (!common_rotated) {
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
+#endif
 	FILE* f = fopen(rotate_fname, "wb");
 	fclose(f);
 	common_rotated = true;
+#ifdef ROTATE_LOGGING
       } else {
 	fprintf(stderr, "  Common already rotated\n");
+#endif
       }
 
     } else if (logger->log_id == 2) {
 
       // Single Zone
+#ifdef ROTATE_LOGGING
       fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
+#endif
       FILE* f = fopen(rotate_fname, "wb");
       fclose(f);
     }
@@ -966,9 +891,13 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 
       // Multi-Zone -- we may have already rotated. No need to create if that's the case.
       if (rotated_by != NULL) {
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  NOT creating empty details for %s, already rotated/created zoneid=%d\n", rotate_fname, *rotated_by);
+#endif
       } else {
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
+#endif
 	FILE* f = fopen(rotate_fname, "wb");
 	fclose(f);
 	owners.Insert(owner_key, new int(logger->zone_id));
@@ -983,7 +912,9 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 	HashKey* open_logger_key = new HashKey(source_fname);
 	DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
 	if (open_logger != NULL) {
+#ifdef ROTATE_LOGGING
 	  fprintf(stderr, "  Removing open logger info %s\n", source_fname);
+#endif
 	  DETAIL_LOGGER_OPEN.Remove(open_logger_key);
 	}
 	delete open_logger_key;
@@ -992,14 +923,18 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
       // Only reopen if we're still logging 
       if (!enabled) {
 	logger->file = NULL;
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  Not opening logger file, now not logging for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
+#endif
 	unlink(source_fname);
       } else {
 	if (logger->log_id == 2) {
 	  // TODO What if we can't open the file? Permissions, etc...
 	  FILE* f = fopen(source_fname, "wb");
 	  logger->file = new BroFile(f);
+#ifdef ROTATE_LOGGING
 	  fprintf(stderr, "  Opening new logger source=%s file=%p\n", source_fname, logger->file);
+#endif
 	}
       }
     } else {
@@ -1582,13 +1517,13 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	    HashKey* open_logger_key = new HashKey(source_fname);
 	    DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
 	    if (open_logger) {
-	      fprintf(stderr, "Using existing logger %s logid=%d owner=%d my_zone=%d other_zone=%d\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, open_logger->zone_id);
+	      // fprintf(stderr, "Using existing logger %s logid=%d owner=%d my_zone=%d other_zone=%d\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, open_logger->zone_id);
 	      logger->file = open_logger->file;
 	    } else {
 	      FILE* f = fopen(source_fname, "wb");
 	      logger->file = new BroFile(f);
 	      DETAIL_LOGGER_OPEN.Insert(open_logger_key, logger);
-	      fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
+	      // fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
 	    }
 	    delete open_logger_key;
 

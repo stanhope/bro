@@ -240,8 +240,8 @@ event bro_init()
 
     } else {
       do_pcaps = F;
-      if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts)
-	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS_TELEMETRY, dns_ports);
+#      if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts)
+#	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS_TELEMETRY, dns_ports);
     }
 }
 

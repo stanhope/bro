@@ -1180,21 +1180,19 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
     zinfo = telemetry_zone_info.Lookup(zone_hash);
 	    
+    bro_int_t owner_id = 0;
+
     if (!zinfo) {
-      
-      // We don't know about this zone. See if we've already got an OTHER bucket.
+      // Get rid of the zoneid based specific hash and use the OTHER zone hash
+      delete zone_hash;
       const char other[] = "OTHER";
       HashKey* other_hash = new HashKey(other);
       zv = telemetry_zone_stats.Lookup(other_hash);
-      // Get rid of the orignal hash and use the new one.
-      delete zone_hash;
       zone_hash = other_hash;
-
+      /*
       if (do_owner_stats && is_query) {
-
 	HashKey* key = new HashKey((bro_int_t)0);
 	owner_stats = OWNER_INFO.Lookup(key);
-
 	if (owner_stats == 0) {
 	  owner_stats = new OwnerStats();
 	  owner_stats->id = 0;
@@ -1204,26 +1202,41 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	++owner_stats->cnt;
 	delete key;
       }
+      */
     } else {
 
       zv = telemetry_zone_stats.Lookup(zone_hash);
       do_zone_details = zinfo->details;
-	      
+      owner_id = (bro_int_t)zinfo->owner_id;
+      /*
       if (do_owner_stats && is_query) {
-
 	HashKey* key = new HashKey((bro_int_t)zinfo->owner_id);
 	owner_stats = OWNER_INFO.Lookup(key);
 	if (owner_stats == 0) {
 	  owner_stats = new OwnerStats();
 	  owner_stats->id = zinfo->owner_id;
 	  owner_stats->cnt = 0;
-	  HashKey* key = new HashKey((bro_int_t)zinfo->owner_id);
 	  OWNER_INFO.Insert(key, owner_stats);
 	}
+	delete key;
 	++owner_stats->cnt;
-	// fprintf(stderr, "Used slot %d for owner_id=%d (%s) cnt=%d\n", OWNER_INFO.Length(), zinfo->owner_id, zinfo->key, owner_stats->cnt);
       }
+      */
+    }
 
+    if (do_owner_stats && is_query) {
+      // NOTE: The owner_id may the actual zone's ... or the OTHER owner id (0)
+      HashKey* key = new HashKey(owner_id);
+      owner_stats = OWNER_INFO.Lookup(key);
+      if (owner_stats == 0) {
+	// We don't even have an OTHER stats collector yet, create one
+	owner_stats = new OwnerStats();
+	owner_stats->id = 0;
+	owner_stats->cnt = 0;
+	OWNER_INFO.Insert(key, owner_stats);
+      }
+      ++owner_stats->cnt;
+      delete key;
     }
 
     if (!zv) {
@@ -1245,6 +1258,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       }
       telemetry_zone_stats.Insert(zone_hash, zv);
     }
+
   }
 
   QnameStats* qname_stat = 0;

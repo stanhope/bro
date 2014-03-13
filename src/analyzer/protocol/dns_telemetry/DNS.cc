@@ -245,6 +245,17 @@ char DETAIL_DEFAULT_PATH[256];
 // Tracks open loggers. Important for the MultiZone (logid=2) scenario.
 PDict(DetailLogInfo) DETAIL_LOGGER_OPEN;
 
+// Allow per zone stats telemetry
+struct StatsLogInfo {
+  char* fname;
+  BroFile* file;
+  int owner_id;
+  bool enabled;
+  CurCounts CNTS;
+};
+declare(PDict,StatsLogInfo);
+PDict(StatsLogInfo) STATS_LOGGER_INFO;
+
 CurCounts CNTS;
 CurCounts TOTALS;
 
@@ -265,66 +276,19 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 
 	DNS_Telemetry_MsgInfo msg((DNS_RawMsgHdr*) data, is_query);
 
+	qlen = 0;
+	rlen = 0;
+
 	if (do_counts) {
-
 	  if (is_query) {
-
 	    CNTS.qlen += len;
 	    TOTALS.qlen += len;
-
-	    if (analyzer->Conn()->ConnTransport() == TRANSPORT_TCP) {
-	      ++CNTS.TCP;
-	      ++TOTALS.TCP;
-	    } else {
-	      // Not really true :-(
-	      ++CNTS.UDP;
-	      ++TOTALS.UDP;
-	    }
-
-	    if (analyzer->Conn()->GetOrigFlowLabel() == 0) {
-	      ++CNTS.V4;
-	      ++TOTALS.V4;
-	    } else {
-	      ++CNTS.V6;
-	      ++TOTALS.V6;
-	    }
-
-	    switch (msg.opcode) 
-	      {
-	      case DNS_OP_QUERY:
-		++CNTS.OpQuery;
-		++TOTALS.OpQuery;
-		break;
-	      case DNS_OP_IQUERY:
-		++CNTS.OpIQuery;
-		++TOTALS.OpIQuery;
-		break;
-	      case DNS_OP_SERVER_STATUS:
-		++CNTS.OpStatus;
-		++TOTALS.OpStatus;
-		break;
-	      case 4:
-		++CNTS.OpNotify;
-		++TOTALS.OpNotify;
-		break;
-	      case 5:
-		++CNTS.OpUpdate;
-		++TOTALS.OpUpdate;
-		break;
-	      default:
-		++CNTS.OpUnassigned;
-		++TOTALS.OpUnassigned;
-		break;
-	      }
-	    if (msg.RD) {
-	      ++CNTS.RD;
-	      ++TOTALS.RD;
-	    }
+	    qlen = len;
 	  } else {
 	    CNTS.rlen += len;
 	    TOTALS.rlen += len;
+	    rlen = len;
 	  }
-
 	}
 
 	if ( dns_telemetry_message )
@@ -348,6 +312,8 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 		}
 
 	const u_char* msg_start = data;	// needed for interpreting compression
+
+	// if (is_query) fprintf(stderr, "ParseMessage len=%d\n", len);
 
 	data += hdr_len;
 	len -= hdr_len;
@@ -464,6 +430,10 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   u_char name[513];
   int name_len = sizeof(name) - 1;
 
+  // if (is_query) fprintf(stderr, "ParseQuestion len=%d\n", len);
+  int hdr_len = sizeof(DNS_RawMsgHdr);
+  int msg_len = len + hdr_len;
+
   char tlz [255];
   u_char* name_end;
 
@@ -485,6 +455,10 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   OwnerStats* owner_stats = 0;
   bool do_zone_details = false;
 
+  CurCounts* custom_stats= 0;
+
+  bro_int_t owner_id = 0;
+
   if (do_zone_stats && dns_telemetry_zone_info) {
 
 #ifdef UNORDERED_MAP
@@ -494,8 +468,6 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     zinfo = telemetry_zone_info.Lookup(zone_hash);
 #endif
 
-    bro_int_t owner_id = 0;
-
     if (!zinfo) {
       // Get rid of the zoneid based specific hash and use the OTHER zone hash
       delete zone_hash;
@@ -504,10 +476,90 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       zv = telemetry_zone_stats.Lookup(other_hash);
       zone_hash = other_hash;
     } else {
-
       zv = telemetry_zone_stats.Lookup(zone_hash);
       do_zone_details = zinfo->details;
       owner_id = (bro_int_t)zinfo->owner_id;
+
+      HashKey* stat_logger_key = new HashKey(owner_id);
+      StatsLogInfo* stat_logger = STATS_LOGGER_INFO.Lookup(stat_logger_key);
+      if (stat_logger) {
+	custom_stats = &stat_logger->CNTS;
+      }
+      delete stat_logger_key;
+    }
+
+    if (do_counts) {
+
+      if (is_query) {
+	if (custom_stats) {
+	  ++custom_stats->request;
+	  custom_stats->qlen += qlen;
+	}	
+      
+	if (analyzer->Conn()->ConnTransport() == TRANSPORT_TCP) {
+	  ++CNTS.TCP;
+	  ++TOTALS.TCP;
+	  if (custom_stats) ++custom_stats->TCP;
+	} else {
+	  // Not really true :-(
+	  ++CNTS.UDP;
+	  ++TOTALS.UDP;
+	  if (custom_stats) ++custom_stats->UDP;
+	}
+      
+	if (analyzer->Conn()->GetOrigFlowLabel() == 0) {
+	  ++CNTS.V4;
+	  ++TOTALS.V4;
+	  if (custom_stats) ++custom_stats->V4;
+	} else {
+	  ++CNTS.V6;
+	  ++TOTALS.V6;
+	  if (custom_stats) ++custom_stats->V4;
+	}
+
+	switch (msg->opcode) 
+	  {
+	  case DNS_OP_QUERY:
+	    ++CNTS.OpQuery;
+	    ++TOTALS.OpQuery;
+	    if (custom_stats) ++custom_stats->OpQuery;
+	    break;
+	  case DNS_OP_IQUERY:
+	    ++CNTS.OpIQuery;
+	    ++TOTALS.OpIQuery;
+	    if (custom_stats) ++custom_stats->OpIQuery;
+	    break;
+	  case DNS_OP_SERVER_STATUS:
+	    ++CNTS.OpStatus;
+	    ++TOTALS.OpStatus;
+	    if (custom_stats) ++custom_stats->OpStatus;
+	    break;
+	  case 4:
+	    ++CNTS.OpNotify;
+	    ++TOTALS.OpNotify;
+	    if (custom_stats) ++custom_stats->OpNotify;
+	    break;
+	  case 5:
+	    ++CNTS.OpUpdate;
+	    ++TOTALS.OpUpdate;
+	    if (custom_stats) ++custom_stats->OpUpdate;
+	    break;
+	  default:
+	    ++CNTS.OpUnassigned;
+	    ++TOTALS.OpUnassigned;
+	    if (custom_stats) ++custom_stats->OpUnassigned;
+	    break;
+	  }
+	if (msg->RD) {
+	  ++CNTS.RD;
+	  ++TOTALS.RD;
+	  if (custom_stats) ++custom_stats->RD;
+	}
+      } else {
+	if (custom_stats) {
+	  custom_stats->rlen += rlen;
+	}	
+      }
     }
 
     if (do_owner_stats && is_query) {
@@ -528,6 +580,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     if (!zv) {
 	      
       ++CNTS.zones;
+      if (custom_stats) 
+	++custom_stats->zones;
       zv = new ZoneStats();
       zv->cnt = 0;
 
@@ -594,7 +648,10 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       } else {
 	telemetry_client_stats.Insert(client_hash, new int(1));
 	++CNTS.clients;
-	++TOTALS.zones;
+	++TOTALS.clients;
+	if (custom_stats) {
+	  ++custom_stats->clients;
+	}
       }
       delete client_hash;
     }
@@ -607,6 +664,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_A:
 	  ++CNTS.A;
 	  ++TOTALS.A;
+	  if (custom_stats) 
+	    ++custom_stats->A;
 	  if (do_qname_stats)
 	    ++qname_stat->A;
 	  if (do_zone_stats)
@@ -615,6 +674,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_NS:
 	  ++CNTS.NS;
 	  ++TOTALS.NS;
+	  if (custom_stats) 
+	    ++custom_stats->NS;
 	  if (do_qname_stats)
 	    ++qname_stat->NS;
 	  if (do_zone_stats)
@@ -623,6 +684,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_CNAME:
 	  ++CNTS.CNAME;
 	  ++TOTALS.CNAME;
+	  if (custom_stats) 
+	    ++custom_stats->CNAME;
 	  if (do_qname_stats)
 	    ++qname_stat->CNAME;
 	  if (do_zone_stats)
@@ -631,6 +694,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_SOA:
 	  ++CNTS.SOA;
 	  ++TOTALS.SOA;
+	  if (custom_stats) 
+	    ++custom_stats->SOA;
 	  if (do_qname_stats)
 	    ++qname_stat->SOA;
 	  if (do_zone_stats)
@@ -639,6 +704,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_PTR:
 	  ++CNTS.PTR;
 	  ++TOTALS.PTR;
+	  if (custom_stats) 
+	    ++custom_stats->PTR;
 	  if (do_qname_stats)
 	    ++qname_stat->PTR;
 	  if (do_zone_stats)
@@ -647,6 +714,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_MX:
 	  ++CNTS.MX;
 	  ++TOTALS.MX;
+	  if (custom_stats) 
+	    ++custom_stats->MX;
 	  if (do_qname_stats)
 	    ++qname_stat->MX;
 	  if (do_zone_stats)
@@ -655,6 +724,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_TXT:
 	  ++CNTS.TXT;
 	  ++TOTALS.TXT;
+	  if (custom_stats) 
+	    ++custom_stats->TXT;
 	  if (do_qname_stats)
 	    ++qname_stat->TXT;
 	  if (do_zone_stats)
@@ -663,6 +734,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_AAAA:
 	  ++CNTS.AAAA;
 	  ++TOTALS.AAAA;
+	  if (custom_stats) 
+	    ++custom_stats->AAAA;
 	  if (do_qname_stats)
 	    ++qname_stat->AAAA;
 	  if (do_zone_stats)
@@ -671,6 +744,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_SRV:
 	  ++CNTS.SRV;
 	  ++TOTALS.SRV;
+	  if (custom_stats) 
+	    ++custom_stats->SRV;
 	  if (do_qname_stats)
 	    ++qname_stat->SRV;
 	  if (do_zone_stats)
@@ -679,6 +754,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case TYPE_ALL:
 	  ++CNTS.ANY;
 	  ++TOTALS.ANY;
+	  if (custom_stats) 
+	    ++custom_stats->ANY;
 	  if (do_qname_stats)
 	    ++qname_stat->other;
 	  if (do_zone_stats)
@@ -686,6 +763,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (msg->RD) {
 	    ++CNTS.ANY_RD;
 	    ++TOTALS.ANY_RD;
+	  if (custom_stats) 
+	    ++custom_stats->RD;
 
 	    if (do_anyrd_stats) {
 	      char anyrd_key[560];
@@ -706,6 +785,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	default:
 	  ++CNTS.other;
 	  ++TOTALS.other;
+	  if (custom_stats) 
+	    ++custom_stats->other;
 	  if (do_qname_stats)
 	    ++qname_stat->other;
 	  if (do_zone_stats)
@@ -724,6 +805,10 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       ++CNTS.rcode_refused;
       ++TOTALS.rejected;
       ++TOTALS.rcode_refused;
+      if (custom_stats) {
+	++custom_stats->rejected;
+	++custom_stats->rcode_refused;
+      }
     }
     if (do_zone_stats)
       ++zv->REFUSED;
@@ -736,6 +821,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
       ++CNTS.logged;
       ++TOTALS.logged;
+      if (custom_stats)
+	++custom_stats->logged;
 
       const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
       const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
@@ -846,6 +933,10 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++CNTS.reply;
 	  ++TOTALS.reply;
 	  ++TOTALS.rcode_noerror;
+	  if (custom_stats) {
+	    ++custom_stats->rcode_noerror;
+	    ++custom_stats->reply;
+	  }
 	  if (do_zone_stats) {
 	    ++zv->NOERROR;
 	  }
@@ -854,24 +945,34 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	case DNS_CODE_FORMAT_ERR:
 	  ++CNTS.rcode_format_err;
 	  ++TOTALS.rcode_format_err;
+	  if (custom_stats) 
+	    ++custom_stats->rcode_format_err;
 	  break;
 	case DNS_CODE_SERVER_FAIL:
 	  ++CNTS.rcode_server_fail;
 	  ++TOTALS.rcode_server_fail;
+	  if (custom_stats) 
+	    ++custom_stats->rcode_server_fail;
 	  break;
 	case DNS_CODE_NAME_ERR:
 	  ++CNTS.rcode_nxdomain;
 	  ++TOTALS.rcode_nxdomain;
+	  if (custom_stats) 
+	    ++custom_stats->rcode_nxdomain;
 	  if (do_zone_stats)
 	    ++zv->NXDOMAIN;
 	  break;
 	case DNS_CODE_NOT_IMPL:
 	  ++CNTS.rcode_not_impl;
 	  ++TOTALS.rcode_not_impl;
+	  if (custom_stats) 
+	    ++custom_stats->rcode_not_impl;
 	  break;
 	case DNS_CODE_REFUSED:
 	  ++CNTS.rcode_refused;
 	  ++TOTALS.rcode_refused;
+	  if (custom_stats) 
+	    ++custom_stats->rcode_refused;
 	  fprintf(stderr, "REFUSED\n");
 	  if (do_zone_stats)
 	    ++zv->REFUSED;
@@ -1808,7 +1909,6 @@ void __dns_telemetry_zone_info_list() {
   fprintf(stderr,"Config @ %f - Zone Info len=%d size=%u loggers=%d\n", current_time(),len, size, loggers);
 }
 
-
 int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
 
   // Config the common logger (logid=3, owner_id=0)
@@ -1838,11 +1938,12 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
   struct stat buf;
   stat(fname, &buf);
   int size = buf.st_size;
+  int estimated_cnt = size / 45;
   strcpy(ZONE_MAP_INFO.fname, fname);
   ZONE_MAP_INFO.last_mod = buf.st_mtime;
   static char timestr[256];
   strftime(timestr, sizeof(timestr), "%Y%m%dT%H%M%S", localtime(&ZONE_MAP_INFO.last_mod));
-  fprintf(stderr, "%f set_zones.start %s %d %s\n", start, fname, size, timestr);
+  fprintf(stderr, "%f set_zones.start %s size=%d cnt=%d (estimate) lastmod=%s\n", start, fname, size, estimated_cnt, timestr);
 
   FILE* f = fopen(fname, "rt");
 
@@ -1919,6 +2020,19 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
       zinfo->stat_id = stat_id;
       zinfo->details = log_id != 0;
 
+      HashKey* stat_logger_key = new HashKey((bro_int_t)owner_id);
+      StatsLogInfo* stat_logger = STATS_LOGGER_INFO.Lookup(stat_logger_key);
+      if (stat_logger) {
+	stat_logger->fname = DETAIL_DEFAULT_PATH;
+      } else if (stat_id != 0) {
+	fprintf(stderr, "Adding stat logger owner_id=%d stat_id=%d\n", owner_id, stat_id);
+	stat_logger = new StatsLogInfo();
+	stat_logger->owner_id = owner_id;
+	STATS_LOGGER_INFO.Insert(stat_logger_key, stat_logger);
+	stat_logger->enabled = true;
+      }
+      delete stat_logger_key;
+
       DetailLogInfo* logger = NULL;
       HashKey* logger_key = new HashKey((bro_int_t)zinfo->zone_id);
       logger = DETAIL_LOGGER_INFO.Lookup(logger_key);
@@ -1979,7 +2093,7 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
 #endif
 
     if (ZONE_UPDATER == NULL) {
-      ZONE_UPDATER = new ZoneUpdater(ZONE_MAP_INFO.fname, 10);
+      ZONE_UPDATER = new ZoneUpdater(ZONE_MAP_INFO.fname, 5);
       ZONE_UPDATER->Start();
     }
 
@@ -1987,154 +2101,118 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
   return 1;
 }
 
-void __dns_telemetry_fire_counts(double ts) {
-  if ( dns_telemetry_count ) {
-    val_list* vl = new val_list;
-    RecordVal* r = new RecordVal(dns_telemetry_counts);
-
-    double lag = current_time() - ts;
-    if (lag > 2) {
-      fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
-    }
-
-    r->Assign(0, new Val(ts, TYPE_DOUBLE));
-    r->Assign(1, new Val(lag, TYPE_DOUBLE));
-    r->Assign(2, new Val(CNTS.request, TYPE_COUNT));
-    r->Assign(3, new Val(CNTS.rejected, TYPE_COUNT));
-    r->Assign(4, new Val(CNTS.reply, TYPE_COUNT));
-    r->Assign(5, new Val(CNTS.non_dns_request, TYPE_COUNT));
-
-    r->Assign(6, new Val(CNTS.ANY_RD, TYPE_COUNT));
-
-    r->Assign(7, new Val(CNTS.ANY, TYPE_COUNT));
-    r->Assign(8, new Val(CNTS.A, TYPE_COUNT));
-    r->Assign(9, new Val(CNTS.AAAA, TYPE_COUNT));
-    r->Assign(10, new Val(CNTS.NS, TYPE_COUNT));
-    r->Assign(11, new Val(CNTS.CNAME, TYPE_COUNT));
-
-    r->Assign(12, new Val(CNTS.PTR, TYPE_COUNT));
-    r->Assign(13, new Val(CNTS.SOA, TYPE_COUNT));
-    r->Assign(14, new Val(CNTS.MX, TYPE_COUNT));
-    r->Assign(15, new Val(CNTS.TXT, TYPE_COUNT));
-    r->Assign(16, new Val(CNTS.SRV, TYPE_COUNT));
-    r->Assign(17, new Val(CNTS.other, TYPE_COUNT));
-
-    r->Assign(18, new Val(CNTS.TCP, TYPE_COUNT));
-    r->Assign(19, new Val(CNTS.UDP, TYPE_COUNT));
-    r->Assign(20, new Val(CNTS.TSIG, TYPE_COUNT));
-    r->Assign(21, new Val(CNTS.EDNS, TYPE_COUNT));
-    r->Assign(22, new Val(CNTS.RD, TYPE_COUNT));
-    r->Assign(23, new Val(CNTS.DO, TYPE_COUNT));
-    r->Assign(24, new Val(CNTS.CD, TYPE_COUNT));
-    r->Assign(25, new Val(CNTS.V4, TYPE_COUNT));
-    r->Assign(26, new Val(CNTS.V6, TYPE_COUNT));
-
-    r->Assign(27, new Val(CNTS.OpQuery, TYPE_COUNT));
-    r->Assign(28, new Val(CNTS.OpIQuery, TYPE_COUNT));
-    r->Assign(29, new Val(CNTS.OpStatus, TYPE_COUNT));
-    r->Assign(30, new Val(CNTS.OpNotify, TYPE_COUNT));
-    r->Assign(31, new Val(CNTS.OpUpdate, TYPE_COUNT));
-    r->Assign(32, new Val(CNTS.OpUnassigned, TYPE_COUNT));
-
-    r->Assign(33, new Val(CNTS.rcode_noerror, TYPE_COUNT));
-    r->Assign(34, new Val(CNTS.rcode_format_err, TYPE_COUNT));
-    r->Assign(35, new Val(CNTS.rcode_server_fail, TYPE_COUNT));
-    r->Assign(36, new Val(CNTS.rcode_nxdomain, TYPE_COUNT));
-    r->Assign(37, new Val(CNTS.rcode_not_impl, TYPE_COUNT));
-    r->Assign(38, new Val(CNTS.rcode_refused, TYPE_COUNT));
-
-    r->Assign(39, new Val(CNTS.logged, TYPE_COUNT));
-
-    uint qlen = CNTS.qlen ? CNTS.qlen / CNTS.request : 0;
-    uint rlen = CNTS.rlen ? CNTS.rlen / (CNTS.reply + CNTS.rejected) : 0;
-
-    r->Assign(40, new Val(qlen, TYPE_COUNT));
-    r->Assign(41, new Val(rlen, TYPE_COUNT));
-
-    r->Assign(42, new Val(CNTS.clients, TYPE_COUNT));
-    r->Assign(43, new Val(CNTS.zones, TYPE_COUNT));
-    r->Assign(44, new Val(CNTS.qlen/1048576.0, TYPE_DOUBLE));
-    r->Assign(45, new Val(CNTS.rlen/1048576.0, TYPE_DOUBLE));
-    r->Assign(46, new Val((CNTS.qlen+CNTS.rlen)/1048576.0, TYPE_DOUBLE));
-
-    vl->append(r);
-    mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
-  }
-  // Clear counters
-  memset(&CNTS, 0, sizeof(CurCounts));
-}
-
-RecordVal*  __dns_telemetry_get_totals(double ts) {
+val_list* buildCountsRecord(CurCounts* cnts, uint owner_id, double ts, double lag) {
+  val_list* vl = new val_list;
   RecordVal* r = new RecordVal(dns_telemetry_counts);
 
   r->Assign(0, new Val(ts, TYPE_DOUBLE));
-  r->Assign(1, new Val(0, TYPE_DOUBLE));
-  r->Assign(2, new Val(TOTALS.request, TYPE_COUNT));
-  r->Assign(3, new Val(TOTALS.rejected, TYPE_COUNT));
-  r->Assign(4, new Val(TOTALS.reply, TYPE_COUNT));
-  r->Assign(5, new Val(TOTALS.non_dns_request, TYPE_COUNT));
+  r->Assign(1, new Val(lag, TYPE_DOUBLE));
+  r->Assign(2, new Val(owner_id, TYPE_COUNT));
+  r->Assign(3, new Val(cnts->request, TYPE_COUNT));
+  r->Assign(4, new Val(cnts->rejected, TYPE_COUNT));
+  r->Assign(5, new Val(cnts->reply, TYPE_COUNT));
+  r->Assign(6, new Val(cnts->non_dns_request, TYPE_COUNT));
 
-  r->Assign(6, new Val(TOTALS.ANY_RD, TYPE_COUNT));
+  r->Assign(7, new Val(cnts->ANY_RD, TYPE_COUNT));
 
-  r->Assign(7, new Val(TOTALS.ANY, TYPE_COUNT));
-  r->Assign(8, new Val(TOTALS.A, TYPE_COUNT));
-  r->Assign(9, new Val(TOTALS.AAAA, TYPE_COUNT));
-  r->Assign(10, new Val(TOTALS.NS, TYPE_COUNT));
-  r->Assign(11, new Val(TOTALS.CNAME, TYPE_COUNT));
+  r->Assign(8, new Val(cnts->ANY, TYPE_COUNT));
+  r->Assign(9, new Val(cnts->A, TYPE_COUNT));
+  r->Assign(10, new Val(cnts->AAAA, TYPE_COUNT));
+  r->Assign(11, new Val(cnts->NS, TYPE_COUNT));
+  r->Assign(12, new Val(cnts->CNAME, TYPE_COUNT));
 
-  r->Assign(12, new Val(TOTALS.PTR, TYPE_COUNT));
-  r->Assign(13, new Val(TOTALS.SOA, TYPE_COUNT));
-  r->Assign(14, new Val(TOTALS.MX, TYPE_COUNT));
-  r->Assign(15, new Val(TOTALS.TXT, TYPE_COUNT));
-  r->Assign(16, new Val(TOTALS.SRV, TYPE_COUNT));
-  r->Assign(17, new Val(TOTALS.other, TYPE_COUNT));
+  r->Assign(13, new Val(cnts->PTR, TYPE_COUNT));
+  r->Assign(14, new Val(cnts->SOA, TYPE_COUNT));
+  r->Assign(15, new Val(cnts->MX, TYPE_COUNT));
+  r->Assign(16, new Val(cnts->TXT, TYPE_COUNT));
+  r->Assign(17, new Val(cnts->SRV, TYPE_COUNT));
+  r->Assign(18, new Val(cnts->other, TYPE_COUNT));
 
-  r->Assign(18, new Val(TOTALS.TCP, TYPE_COUNT));
-  r->Assign(19, new Val(TOTALS.UDP, TYPE_COUNT));
-  r->Assign(20, new Val(TOTALS.TSIG, TYPE_COUNT));
-  r->Assign(21, new Val(TOTALS.EDNS, TYPE_COUNT));
-  r->Assign(22, new Val(TOTALS.RD, TYPE_COUNT));
-  r->Assign(23, new Val(TOTALS.DO, TYPE_COUNT));
-  r->Assign(24, new Val(TOTALS.CD, TYPE_COUNT));
-  r->Assign(25, new Val(TOTALS.V4, TYPE_COUNT));
-  r->Assign(26, new Val(TOTALS.V6, TYPE_COUNT));
+  r->Assign(19, new Val(cnts->TCP, TYPE_COUNT));
+  r->Assign(20, new Val(cnts->UDP, TYPE_COUNT));
+  r->Assign(21, new Val(cnts->TSIG, TYPE_COUNT));
+  r->Assign(22, new Val(cnts->EDNS, TYPE_COUNT));
+  r->Assign(23, new Val(cnts->RD, TYPE_COUNT));
+  r->Assign(24, new Val(cnts->DO, TYPE_COUNT));
+  r->Assign(25, new Val(cnts->CD, TYPE_COUNT));
+  r->Assign(26, new Val(cnts->V4, TYPE_COUNT));
+  r->Assign(27, new Val(cnts->V6, TYPE_COUNT));
 
-  r->Assign(27, new Val(TOTALS.OpQuery, TYPE_COUNT));
-  r->Assign(28, new Val(TOTALS.OpIQuery, TYPE_COUNT));
-  r->Assign(29, new Val(TOTALS.OpStatus, TYPE_COUNT));
-  r->Assign(30, new Val(TOTALS.OpNotify, TYPE_COUNT));
-  r->Assign(31, new Val(TOTALS.OpUpdate, TYPE_COUNT));
-  r->Assign(32, new Val(TOTALS.OpUnassigned, TYPE_COUNT));
+  r->Assign(28, new Val(cnts->OpQuery, TYPE_COUNT));
+  r->Assign(29, new Val(cnts->OpIQuery, TYPE_COUNT));
+  r->Assign(30, new Val(cnts->OpStatus, TYPE_COUNT));
+  r->Assign(31, new Val(cnts->OpNotify, TYPE_COUNT));
+  r->Assign(32, new Val(cnts->OpUpdate, TYPE_COUNT));
+  r->Assign(33, new Val(cnts->OpUnassigned, TYPE_COUNT));
 
-  r->Assign(33, new Val(TOTALS.rcode_noerror, TYPE_COUNT));
-  r->Assign(34, new Val(TOTALS.rcode_format_err, TYPE_COUNT));
-  r->Assign(35, new Val(TOTALS.rcode_server_fail, TYPE_COUNT));
-  r->Assign(36, new Val(TOTALS.rcode_nxdomain, TYPE_COUNT));
-  r->Assign(37, new Val(TOTALS.rcode_not_impl, TYPE_COUNT));
-  r->Assign(38, new Val(TOTALS.rcode_refused, TYPE_COUNT));
-  r->Assign(39, new Val(TOTALS.logged, TYPE_COUNT));
+  r->Assign(34, new Val(cnts->rcode_noerror, TYPE_COUNT));
+  r->Assign(35, new Val(cnts->rcode_format_err, TYPE_COUNT));
+  r->Assign(36, new Val(cnts->rcode_server_fail, TYPE_COUNT));
+  r->Assign(37, new Val(cnts->rcode_nxdomain, TYPE_COUNT));
+  r->Assign(38, new Val(cnts->rcode_not_impl, TYPE_COUNT));
+  r->Assign(39, new Val(cnts->rcode_refused, TYPE_COUNT));
 
-  // THIS ISN'T MEANINGFUL ... Just emitting so that we don't die 
-  uint qlen = CNTS.qlen ? CNTS.qlen / CNTS.request : 0;
-  uint rlen = CNTS.rlen ? CNTS.rlen / (CNTS.reply + CNTS.rejected) : 0;
+  r->Assign(40, new Val(cnts->logged, TYPE_COUNT));
 
-  r->Assign(40, new Val(qlen, TYPE_COUNT));
-  r->Assign(41, new Val(rlen, TYPE_COUNT));
+  // Compute average qlen & rlen
+  uint qlen = cnts->qlen ? cnts->qlen / cnts->request : 0;
+  uint rlen = cnts->rlen ? cnts->rlen / (cnts->reply + cnts->rejected) : 0;
 
-  r->Assign(42, new Val(TOTALS.clients, TYPE_COUNT));
-  r->Assign(43, new Val(TOTALS.zones, TYPE_COUNT));
-  // NOT MEANINGFUL ... new total time and to keep track of total rlen/qlen
-  r->Assign(44, new Val(TOTALS.qlen/1048576.0, TYPE_DOUBLE));
-  r->Assign(45, new Val(TOTALS.rlen/1048576.0, TYPE_DOUBLE));
-  r->Assign(46, new Val((TOTALS.qlen+TOTALS.rlen)/1048576.0, TYPE_DOUBLE));
+  // fprintf(stderr, "qlen=%u rlen=%u\n", qlen, rlen);
 
-  return r;
+  r->Assign(41, new Val(qlen, TYPE_COUNT));
+  r->Assign(42, new Val(rlen, TYPE_COUNT));
+
+  // r->Assign(41, new Val(cnts->qlen, TYPE_COUNT));
+  // r->Assign(42, new Val(cnts->rlen, TYPE_COUNT));
+
+  r->Assign(43, new Val(cnts->clients, TYPE_COUNT));
+  r->Assign(44, new Val(cnts->zones, TYPE_COUNT));
+  r->Assign(45, new Val(cnts->qlen/1048576.0, TYPE_DOUBLE));
+  r->Assign(46, new Val(cnts->rlen/1048576.0, TYPE_DOUBLE));
+  r->Assign(47, new Val((cnts->qlen+cnts->rlen)/1048576.0, TYPE_DOUBLE));
+
+  vl->append(r);
+  return vl;
+}
+
+void __dns_telemetry_fire_counts(double ts) {
+  if ( dns_telemetry_count ) {
+    double lag = current_time() - ts;
+    val_list* vl = buildCountsRecord(&CNTS, 0, ts, lag);
+    if (lag > 2) {
+      fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
+    }
+    mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
+
+    // Clear counters
+    memset(&CNTS, 0, sizeof(CurCounts));
+
+    // Now process each custom stats logger
+    int len = STATS_LOGGER_INFO.Length();
+    if (len > 0) {
+      IterCookie* cookie = STATS_LOGGER_INFO.InitForIteration();
+      HashKey* key;
+      StatsLogInfo* logger;
+      while ((logger = STATS_LOGGER_INFO.NextEntry(key, cookie))) {
+	// fprintf(stderr, "STATS_LOGGER oid=%d enabled=%d request=%d\n", logger->owner_id, logger->enabled, logger->CNTS.request);
+	if (logger->enabled) {
+	  // if (logger->CNTS.request > 0) {
+	  val_list* vl = buildCountsRecord(&logger->CNTS, logger->owner_id, ts, lag);
+	  mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
+	  // }
+	  memset(&logger->CNTS, 0, sizeof(CurCounts));
+	}
+      }
+    }
+  }
 }
 
 void __dns_telemetry_fire_totals(double ts) {
   if ( dns_telemetry_totals ) {
-    val_list* vl = new val_list;
-    vl->append(__dns_telemetry_get_totals(ts));
+    // val_list* vl = new val_list;
+    // vl->append(__dns_telemetry_get_totals(ts));
+    val_list* vl = buildCountsRecord(&TOTALS, 0, ts, 0);
     mgr.Dispatch(new Event(dns_telemetry_totals, vl), true);
   } 
 }

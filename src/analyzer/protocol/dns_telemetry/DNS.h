@@ -158,6 +158,9 @@ public:
 	void Timeout()	{ }
 
 protected:
+	int qlen;
+	int rlen;
+
 	int EndMessage(DNS_Telemetry_MsgInfo* msg);
 
 	int ParseQuestions(DNS_Telemetry_MsgInfo* msg,

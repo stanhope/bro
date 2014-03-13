@@ -3179,6 +3179,7 @@ type dns_telemetry_edns_additional: record {
 type dns_telemetry_counts: record {
  ts: double &log;
  lag: double &log;
+ owner: count &log;
  request: count &log;
  rejected: count &log;
  reply: count &log;

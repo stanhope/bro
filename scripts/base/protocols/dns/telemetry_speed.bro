@@ -65,7 +65,8 @@ global path_log_pcaps = "/var/log/dyn/pcaps/trace";
 global path_config_dbind = "/etc/dbind/bro_dns_telemetry.cfg";
 global path_config_zones = "/etc/dbind/bro_zones.cfg";
 
-redef enum Log::ID += { ZONES, OWNERS, QNAMES, COUNTS, ANYRD, CLIENTS };
+# Added a few hard-coded custom count loggers. Need to make these dynamic and associate to specified owner id
+redef enum Log::ID += { ZONES, OWNERS, QNAMES, COUNTS, ANYRD, CLIENTS, COUNTS_CUSTOM_1, COUNTS_CUSTOM_2, COUNTS_CUSTOM_3 };
 
 function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
 {
@@ -175,6 +176,10 @@ event bro_init()
     CreateLogStream(DBIND9::OWNERS, [$columns=dns_telemetry_owner_stats], path_log_owners);
     CreateLogStream(DBIND9::QNAMES, [$columns=dns_telemetry_qname_stats], path_log_qnames);
 
+    CreateLogStream(DBIND9::COUNTS_CUSTOM_1, [$columns=dns_telemetry_counts], path_log_counts+"-O-000001");
+    CreateLogStream(DBIND9::COUNTS_CUSTOM_2, [$columns=dns_telemetry_counts], path_log_counts+"-O-000002");
+    CreateLogStream(DBIND9::COUNTS_CUSTOM_3, [$columns=dns_telemetry_counts], path_log_counts+"-O-000003");
+
     if (reading_live_traffic()) {
         pkt_dumper_set(path_log_pcaps);
 	# Load the config table. Successful loading of this will initiate analyzer and start processing
@@ -186,7 +191,7 @@ event bro_init()
 
 event bro_done()
 {
-    print fmt("bro_done clock=%f net=%f rotate=%f first=%f last=%f", current_time(), network_time(),next_rotate, time_network_first, time_network_last);
+    print fmt("%f bro_done net=%f rotate=%f first=%f last=%f", current_time(), network_time(),next_rotate, time_network_first, time_network_last);
 }
 
 global header_emit:bool = F;
@@ -194,11 +199,17 @@ global header_emit:bool = F;
 event dns_telemetry_count(info:dns_telemetry_counts) {
     if (!header_emit) {
 	print "";
-	print "ts network_time lag - request,reply,rejected,non_dns_request,logged,clients,zones,MBsec,MBin,MBout,MBsec";
+	print "ts network_time lag - owner,request,reply,rejected,non_dns_request,logged,clients,zones,A,AAAA,CNAME,SOA,SRV,TXT,MX,qlen,rlen,MBsec,MBin,MBout,MBsec";
 	header_emit = T;
     }
-    print fmt("%f %s %f - %d,%d,%d,%d,%d,%d,%d,%05.2f,%05.2f,%05.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$non_dns_request,info$logged,info$clients,info$zones,info$MBin,info$MBout,info$MBsec);
-    Log::write_at(info$ts, DBIND9::COUNTS, info);
+    if (info$owner == 0) {
+      print fmt("%f %s %f - %d,%d,%d,%d,%d,%d,%05.2f,%05.2f,%05.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$owner, info$request,info$reply,info$rejected,info$non_dns_request,info$logged,info$MBin,info$MBout,info$MBsec);
+      Log::write_at(info$ts, DBIND9::COUNTS, info);
+    } else if (info$owner == 1) {
+#       print fmt("custom_stat %s", info);
+      Log::write_at(info$ts, DBIND9::COUNTS_CUSTOM_1, info);
+    }
+       
 }
 
 event dns_telemetry_totals(info:dns_telemetry_counts) {

@@ -28,18 +28,14 @@ global do_zones=T;
 global do_owners=T;
 global do_qnames=F;
 global do_pcaps=F;
-global index_type=0;
 
 const dns_ports = { 53/udp, 53/tcp };
-redef likely_server_ports += { likely_server_ports };
+global valid_hostnames:set[addr] = {10.151.43.122, [::1], 172.16.200.69, 127.0.0.1};
 
 global time_network_first:double=0;
 global time_network_start:double=0;
 global time_network_last:double=0;
-
 global next_rotate:double = 0;
-global hostname:string = gethostname();
-global valid_hostnames:set[addr] = {10.151.43.122, [::1], 172.16.200.69, 127.0.0.1};
 
 type ConfigRecord: record {
     counts: bool;
@@ -52,46 +48,20 @@ type ConfigRecord: record {
     clients: bool;
 };
 
-type ZoneInfo: record {
-    name:string;
-    zoneid:int;
-    ownid:int;
-    logid:int;
-    statid:int;
-    qnameid:int;
-};
-
-type ZoneIdx: record {
-    id: count;
-};
-
 type ConfigIdx: record {
     ts: time;
 };
 
-type Info: record {
-     ts: double &log;
-};
-
-global zones_to_log: table[count] of ZoneInfo = table();
-
 global config: table[time] of ConfigRecord = table();
-global current_config_val: ConfigRecord;
-global current_config_idx: ConfigIdx;
-
-global last_count_time:double = 0;
-global config_loaded:bool = F;
-global zones_loaded:bool = F;
 
 global path_log_details = "/var/log/dyn/qps/details";
 global path_log_zones = "/var/log/dyn/qps/zones";
-global path_log_owners = "/var/log/dyn/qps/customers";
+global path_log_owners = "/var/log/dyn/qps/owners";
 global path_log_qnames = "/var/log/dyn/qps/qnames";
 global path_log_clients = "/var/log/dyn/ops/clients";
 global path_log_counts = "/var/log/dyn/ops/counts";
 global path_log_anyrd = "/var/log/dyn/ops/anyrd";
 global path_log_pcaps = "/var/log/dyn/pcaps/trace";
-
 global path_config_dbind = "/etc/dbind/bro_dns_telemetry.cfg";
 global path_config_zones = "/etc/dbind/bro_zones.cfg";
 
@@ -140,21 +110,12 @@ function init_manual_rotate(ts:time):double {
     delta_1sec = interval_to_double(calc_next_rotate_from(time_now, ival));
     next_rotate = now+delta_rotate;
     Log::install_manual_timer(now+delta_1sec, interval_to_double(ival));
-    print fmt("init_manual_rotate next=%f delta_rotate=%f delta_1sec=%f",next_rotate,delta_rotate, delta_1sec);
+    print fmt("%f init.rotate next=%f delta_rotate=%f delta_1sec=%f",current_time(), next_rotate,delta_rotate, delta_1sec);
   }
   return delta_rotate;
 }
 
-# Track when the system does a rotation
-function custom_rotate(info: Log::RotationInfo) : bool
-{
-#    print fmt("rotate_callback next=%f %s", next_rotate, info);
-    return T;
-}
-
 event config_change(description: Input::TableDescription, tpe: Input::Event, left: ConfigIdx, right: ConfigRecord) {
-    current_config_val = config[left$ts];
-    current_config_idx = left;
     local item:ConfigRecord = config[left$ts];
     if (tpe == Input::EVENT_NEW || tpe == Input::EVENT_CHANGED) {
 	do_counts = item$counts;
@@ -165,7 +126,6 @@ event config_change(description: Input::TableDescription, tpe: Input::Event, lef
 	do_owners = item$owners;
 	do_qnames = item$qnames;
 	do_pcaps = item$pcaps;
-
         local cur_trace_file = pkt_dumper_file();
 	if (!do_pcaps) {
 	    if (cur_trace_file != "") {
@@ -183,65 +143,44 @@ event config_change(description: Input::TableDescription, tpe: Input::Event, lef
 function CreateLogStream(id: Log::ID, config: Log::Stream, path:string) {
   Log::create_stream(id, config);
   Log::remove_default_filter(id);
-#  Log::add_filter(id, [$name=path, $path=path, $postprocessor=custom_rotate]);
-# If we want only CSV single header line, specify the 'tsv' option
-  Log::add_filter(id, [$name=path, $path=path, $postprocessor=custom_rotate, $config=table(["tsv"] = "T",["escape"] = "F")]);
+  Log::add_filter(id, [$name=path, $path=path, $config=table(["tsv"] = "T",["escape"] = "F")]);
 }
 
 event Input::end_of_data(name: string, source: string)
 {
-    if (name == path_config_zones) {
-	print fmt("Loaded @ %s [%s]:", current_time(), name);
-	zones_loaded = T;
-	for(key in zones_to_log) {
-	  local item:ZoneInfo = zones_to_log[key];
-	  # print item;
-   	  dns_telemetry_zone_info_add(item$name, item$zoneid, item$ownid, item$logid, item$statid, item$qnameid);
-	}
-	dns_telemetry_zone_info_list();
-
-    } else if (name == path_config_dbind) {
-	print fmt("Loaded @ %s [%s]: %s%s", current_time(), name, current_config_idx, current_config_val);
-	config_loaded = T;
-	dns_telemetry_set_do_zones(do_zones);
-	dns_telemetry_set_do_owners(do_owners);
-	dns_telemetry_set_do_anyrd(do_anyrd);
-	dns_telemetry_set_do_qnames(do_qnames);
-	dns_telemetry_set_do_clients(do_clients);
-	dns_telemetry_set_do_counts(do_counts);
-	dns_telemetry_set_do_totals(T);
-	dns_telemetry_set_do_details(do_details, path_log_details);
-    }
-    if (zones_loaded && config_loaded) {
+    print fmt("%f config loaded", current_time());
+    dns_telemetry_set_do_details(do_details);
+    dns_telemetry_set_do_zones(do_zones, path_config_zones, path_log_details);
+    dns_telemetry_set_do_owners(do_owners);
+    dns_telemetry_set_do_anyrd(do_anyrd);
+    dns_telemetry_set_do_qnames(do_qnames);
+    dns_telemetry_set_do_clients(do_clients);
+    dns_telemetry_set_do_counts(do_counts);
+    dns_telemetry_set_do_totals(T);
     
-      if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts)
-	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS_TELEMETRY, dns_ports);
-    }
+    if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts)
+        local delta:double = init_manual_rotate(current_time());
+    local now:double = time_to_double(current_time());
+    print fmt("%f init.complete reading_live=%d pcaps=%d", now, reading_live_traffic(), do_pcaps);
+    Analyzer::register_for_ports(Analyzer::ANALYZER_DNS_TELEMETRY, dns_ports);
 }
-
-global header_emit:bool = F;
 
 event bro_init()
 {
-   CreateLogStream(DBIND9::COUNTS, [$columns=dns_telemetry_counts], path_log_counts);
-   CreateLogStream(DBIND9::CLIENTS, [$columns=dns_telemetry_client_stats], path_log_clients);
-   CreateLogStream(DBIND9::ANYRD, [$columns=dns_telemetry_anyrd_stats], path_log_anyrd);
-   CreateLogStream(DBIND9::ZONES, [$columns=dns_telemetry_zone_stats], path_log_zones);
-   CreateLogStream(DBIND9::OWNERS, [$columns=dns_telemetry_owner_stats], path_log_owners);
-   CreateLogStream(DBIND9::QNAMES, [$columns=dns_telemetry_qname_stats], path_log_qnames);
+    print fmt("%f init.start", time_to_double(current_time()));
+    CreateLogStream(DBIND9::COUNTS, [$columns=dns_telemetry_counts], path_log_counts);
+    CreateLogStream(DBIND9::CLIENTS, [$columns=dns_telemetry_client_stats], path_log_clients);
+    CreateLogStream(DBIND9::ANYRD, [$columns=dns_telemetry_anyrd_stats], path_log_anyrd);
+    CreateLogStream(DBIND9::ZONES, [$columns=dns_telemetry_zone_stats], path_log_zones);
+    CreateLogStream(DBIND9::OWNERS, [$columns=dns_telemetry_owner_stats], path_log_owners);
+    CreateLogStream(DBIND9::QNAMES, [$columns=dns_telemetry_qname_stats], path_log_qnames);
 
     if (reading_live_traffic()) {
         pkt_dumper_set(path_log_pcaps);
-        local delta:double = init_manual_rotate(current_time());
-	print fmt("BRO_INIT clock=%f net=%f reading_live=%d reading_traces=%d tracing=%d rotate_in=%f next_rotate=%f trace=%s", time_to_double(current_time()), time_to_double(network_time()), reading_live_traffic(), reading_traces(), do_pcaps, delta, next_rotate, path_log_pcaps);
-	   print fmt("  Telemetry Config: COUNTS=%d TOTALS=%d DETAILS=%d ANYRD=%d CLIENTS=%d ZONES=%d QNAMES=%d", dns_telemetry_get_do_counts(), dns_telemetry_get_do_totals(), dns_telemetry_get_do_details(), dns_telemetry_get_do_anyrd(), dns_telemetry_get_do_clients(), dns_telemetry_get_do_zones(), dns_telemetry_get_do_qnames());
+	# Load the config table. Successful loading of this will initiate analyzer and start processing
 	Input::add_table([$source=path_config_dbind, $name=path_config_dbind, $idx=ConfigIdx, $val=ConfigRecord, $destination=config, $ev=config_change, $mode=Input::REREAD]);
-	Input::add_table([$source=path_config_zones, $name=path_config_zones, $idx=ZoneIdx, $val=ZoneInfo, $destination=zones_to_log, $mode=Input::REREAD]);
-
     } else {
-      do_pcaps = F;
-#      if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts)
-#	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS_TELEMETRY, dns_ports);
+	do_pcaps = F;
     }
 }
 
@@ -250,42 +189,40 @@ event bro_done()
     print fmt("bro_done clock=%f net=%f rotate=%f first=%f last=%f", current_time(), network_time(),next_rotate, time_network_first, time_network_last);
 }
 
+global header_emit:bool = F;
+
 event dns_telemetry_count(info:dns_telemetry_counts) {
-      if (!header_emit) {
-  print "network_time lag - ts,request,reply,rejected,non_dns_request,logged,clients,zones,MBsec,MBin,MBout,MBsec";
-  header_emit = T;
-      }
-  print fmt("%s %f - %f,%d,%d,%d,%d,%d,%d,%d,%05.2f,%05.2f,%05.2f",strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$ts,info$request,info$reply,info$rejected,info$non_dns_request,info$logged,info$clients,info$zones,info$MBin,info$MBout,info$MBsec);
-  Log::write_at(info$ts, DBIND9::COUNTS, info);
+    if (!header_emit) {
+	print "";
+	print "ts network_time lag - request,reply,rejected,non_dns_request,logged,clients,zones,MBsec,MBin,MBout,MBsec";
+	header_emit = T;
+    }
+    print fmt("%f %s %f - %d,%d,%d,%d,%d,%d,%d,%05.2f,%05.2f,%05.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$non_dns_request,info$logged,info$clients,info$zones,info$MBin,info$MBout,info$MBsec);
+    Log::write_at(info$ts, DBIND9::COUNTS, info);
 }
 
 event dns_telemetry_totals(info:dns_telemetry_counts) {
-  print fmt("event.dns_telemetry_totals %s", info);      
+    print fmt("event.dns_telemetry_totals %s", info);      
 }
 
 event dns_telemetry_anyrd_info(info:dns_telemetry_anyrd_stats) {
-#  print fmt("event.dns_telemetry_anyrd %s", info);
-  Log::write_at(info$ts, DBIND9::ANYRD, info);
+    Log::write_at(info$ts, DBIND9::ANYRD, info);
 }
 
 event dns_telemetry_client_info(info:dns_telemetry_client_stats) {
-#  print fmt("event.dns_telemetry_client %s", info);
-  Log::write_at(info$ts, DBIND9::CLIENTS, info);
+    Log::write_at(info$ts, DBIND9::CLIENTS, info);
 }
 
 event dns_telemetry_zone_info(info:dns_telemetry_zone_stats) {
-#  print fmt("event.dns_telemetry_zone %s", info);
-  Log::write_at(info$ts, DBIND9::ZONES, info);
+    Log::write_at(info$ts, DBIND9::ZONES, info);
 }
 
 event dns_telemetry_owner_info(info:dns_telemetry_owner_stats) {
-#  print fmt("event.dns_telemetry_owner %s", info);
-  Log::write_at(info$ts, DBIND9::OWNERS, info);
+    Log::write_at(info$ts, DBIND9::OWNERS, info);
 }
 
 event dns_telemetry_qname_info(info:dns_telemetry_qname_stats) {
-#  print fmt("event.dns_telemetry_qname %s", info);
-  Log::write_at(info$ts, DBIND9::QNAMES, info);
+    Log::write_at(info$ts, DBIND9::QNAMES, info);
 }
 
 

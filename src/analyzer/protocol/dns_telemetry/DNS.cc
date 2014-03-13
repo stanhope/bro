@@ -26,6 +26,9 @@
 
 #include "events.bif.h"
 
+#include <unordered_map>
+#include "hash_func.h"
+
 using namespace analyzer::dns_telemetry;
 
 struct CurCounts {
@@ -148,6 +151,71 @@ PDict(QnameStats) telemetry_qname_stats;
 PDict(ZoneStats) telemetry_zone_stats;
 PDict(ZoneInfo) telemetry_zone_info;
 
+#define UNORDERED_MAP
+unordered_map<string, ZoneInfo*> zone_info;
+// unordered_map<string, ZoneInfo*, SuperFastHashChar, StringKeyEq> zone_info;
+// unordered_map<string, ZoneInfo*, JesteressHashChar, StringKeyEq> zone_info;
+// unordered_map<string, ZoneInfo*, MurmorChar, StringKeyEq> zone_info;
+
+struct ZoneMapInfo {
+  char fname[512];
+  time_t last_mod;
+};
+
+ZoneMapInfo ZONE_MAP_INFO;
+
+class ZoneUpdater : public threading::MsgThread {
+public:
+  ZoneUpdater(char* _fname, double _interval = 60);
+  virtual ~ZoneUpdater();
+  virtual bool OnHeartbeat(double network_time, double current_time);
+  virtual bool OnFinish(double network_time);
+protected:
+  double interval;
+  double next;
+  time_t last;
+  char* fname;
+};
+
+ZoneUpdater::ZoneUpdater(char* _fname, double _interval) {
+  SetName("ZoneUpdater");
+  interval = _interval;
+  fname = _fname;
+  next = current_time() + interval;
+  struct stat buf;
+  stat(fname, &buf);
+  int size = buf.st_size;
+  last = buf.st_mtime;
+}
+
+ZoneUpdater::~ZoneUpdater() {
+}
+
+int __dns_telemetry_set_zones(const char* fname, const char* details_fname);
+
+bool ZoneUpdater::OnHeartbeat(double network_time, double current_time) {
+  if (current_time > next) {
+    // See if the zonemap has changed
+    struct stat buf;
+    stat(ZONE_MAP_INFO.fname, &buf);
+    if (buf.st_mtime != ZONE_MAP_INFO.last_mod) {
+      static char old_timestr[256];
+      strftime(old_timestr, sizeof(old_timestr), "%Y%m%dT%H%M%S", localtime(&ZONE_MAP_INFO.last_mod));
+      static char new_timestr[256];
+      strftime(new_timestr, sizeof(new_timestr), "%Y%m%dT%H%M%S", localtime(&buf.st_mtime));
+      fprintf(stderr,"%f zonemap change detected old=%s new=%s\n", current_time, old_timestr, new_timestr);
+      __dns_telemetry_set_zones(ZONE_MAP_INFO.fname, NULL);
+    }
+    next += interval;
+  }
+  return 1;
+}
+
+bool ZoneUpdater::OnFinish(double network_time) {
+  return 1;
+}
+
+ZoneUpdater* ZONE_UPDATER = NULL;
 
 bool do_counts = false;
 bool do_totals = false;
@@ -157,10 +225,6 @@ bool do_qname_stats = true;
 bool do_anyrd_stats = true;
 bool do_client_stats = true;
 bool do_details = true;
-
-// Set to true and ENSURE and a single log file will be created.
-// NOTE: Not fully implemented. Was the original behavior.
-bool SINGLE_DETAILS_LOG = false;
 
 struct DetailLogInfo {
   double ts;
@@ -174,39 +238,12 @@ struct DetailLogInfo {
   BroFile* file;
 };
 
-char DEFAULT_DETAILS[512] = "/var/log/dyn/qps/details";
 declare(PDict,DetailLogInfo);
 PDict(DetailLogInfo) DETAIL_LOGGER_INFO;
+char DETAIL_DEFAULT_PATH[256];
 
 // Tracks open loggers. Important for the MultiZone (logid=2) scenario.
 PDict(DetailLogInfo) DETAIL_LOGGER_OPEN;
-
-void set_do_details(bool enable, const char* fname) {
-
-  do_details = enable;
-
-  DetailLogInfo* logger;
-  HashKey* key = new HashKey((bro_int_t)0);
-  if (DETAIL_LOGGER_INFO.Length() == 0) {
-    logger = new DetailLogInfo();
-    DETAIL_LOGGER_INFO.Insert(key, logger);
-  } else {
-    logger = DETAIL_LOGGER_INFO.Lookup(key);
-  }
-  delete key;
-
-  // logger->fname = (char*)malloc(256);
-  // strcpy(logger->fname, fname);
-  strcpy(DEFAULT_DETAILS, fname);
-  logger->fname = DEFAULT_DETAILS;
-  logger->owner_id = 0;
-  logger->enabled = false;
-  logger->file = NULL;
-  logger->log_id = 3;
-  logger->ts = network_time;
-
-  fprintf(stderr, "set_do_details enable=%d fname=%s\n", do_details, fname);
-}
 
 CurCounts CNTS;
 CurCounts TOTALS;
@@ -415,713 +452,10 @@ int DNS_Telemetry_Interpreter::ParseAnswers(DNS_Telemetry_MsgInfo* msg, int n, D
 				const u_char* msg_start)
 	{
 	msg->answer_type = atype;
-
 	while ( n > 0 && ParseAnswer(msg, data, len, msg_start) )
 		--n;
-
 	return n == 0;
 	}
-
-void __dns_telemetry_zone_info_add(StringVal* name, int zone_id, int owner_id, int logid, int statid, int qnameid) {
-
-  // TODO: Implement QNAME logging.
-  // TODO: Implement STATS logging.
-
-  const char* zname = name->CheckString();
-  HashKey* zone_hash = new HashKey(zname);
-  ZoneInfo* zinfo = telemetry_zone_info.Lookup(zone_hash);
-  if (!zinfo) {
-    zinfo = new ZoneInfo();
-    telemetry_zone_info.Insert(zone_hash, zinfo);
-  }
-  strcpy(zinfo->key, zname);
-  zinfo->zone_id = zone_id;
-  zinfo->owner_id = owner_id;
-  zinfo->log_id = logid;
-  zinfo->stat_id = statid;
-  zinfo->details = logid != 0;
-
-  if (logid > 3) {
-    fprintf(stderr, "ERROR: log_id must be either 0 (none), 1 (owner), 2 (zone) or 3 (common) logid=%d owner_id=%d zone_id=%d %s\n", logid, owner_id, zone_id, zname);
-    return;
-  }
-
-  if (logid != 0) 
-    fprintf(stderr, "zone_info_add\t%s\tzid=%d\toid=%d\tlid=%d\tsid=%d\n", zname, zone_id, owner_id, logid, statid);
-
-  DetailLogInfo* logger = NULL;
-  HashKey* logger_key = new HashKey((bro_int_t)zinfo->zone_id);
-  logger = DETAIL_LOGGER_INFO.Lookup(logger_key);
-  delete logger_key;
-  
-  if (logid == 0 && logger) {
-
-    // Update the logid. Could be toggling details on/off for a particular customer
-    // Owner ID can't / shouldn't change. Nor the location that we write these logs to.
-    if (logger->log_id != 0) {
-      fprintf(stderr, "zone_info_add\t%s\tdisabling logging (was %d)\n", zname, logger->log_id);
-    }
-    logger->log_id = logid;
-    logger->enabled = false;
-
-  } else if (logid != 0) {
-
-    // If we don't have a logger info yet, create it.
-    if (logger == NULL) {
-      // Create and init a DetailLogInfo structure
-      logger = new DetailLogInfo();
-      logger->owner_id = zinfo->owner_id;
-      logger->log_id = zinfo->log_id;
-      logger->zone_id = zinfo->zone_id;
-      logger->ts = network_time;
-      logger->enabled = true;
-      
-      if (logid == 3) {
-	// Ensure that the common logger is enabled
-	HashKey* common_logger_key = new HashKey((bro_int_t)0);
-	DetailLogInfo* common_logger = DETAIL_LOGGER_INFO.Lookup(common_logger_key);
-	if (common_logger == 0) {
-	  fprintf(stderr, "ERROR: Unable to find default (common) logger!\n");
-	  exit(1);
-	} else {
-	  common_logger->enabled = true;
-	}
-	delete common_logger_key;
-      }
-
-      // Use the base multi-tenant logger's root
-      logger->fname = DEFAULT_DETAILS;
-      HashKey* log_key = new HashKey((bro_int_t)zinfo->zone_id);
-      DETAIL_LOGGER_INFO.Insert(log_key, logger);
-      delete log_key;
-    }
-  }
-}
-
-void __dns_telemetry_zone_info_list() {
-
-  // Dump the zone map
-  IterCookie* c = telemetry_zone_info.InitForIteration();
-  HashKey* k;
-  ZoneInfo* val;
-  fprintf(stderr,"Config @ %f - Zone Info len=%d loggers=%d\n", current_time(),telemetry_zone_info.Length(), DETAIL_LOGGER_INFO.Length());
-}
-
-void __dns_telemetry_fire_counts(double ts) {
-  if ( dns_telemetry_count ) {
-    val_list* vl = new val_list;
-    RecordVal* r = new RecordVal(dns_telemetry_counts);
-
-    double lag = current_time() - ts;
-    if (lag > 2) {
-      fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
-    }
-
-    r->Assign(0, new Val(ts, TYPE_DOUBLE));
-    r->Assign(1, new Val(lag, TYPE_DOUBLE));
-    r->Assign(2, new Val(CNTS.request, TYPE_COUNT));
-    r->Assign(3, new Val(CNTS.rejected, TYPE_COUNT));
-    r->Assign(4, new Val(CNTS.reply, TYPE_COUNT));
-    r->Assign(5, new Val(CNTS.non_dns_request, TYPE_COUNT));
-
-    r->Assign(6, new Val(CNTS.ANY_RD, TYPE_COUNT));
-
-    r->Assign(7, new Val(CNTS.ANY, TYPE_COUNT));
-    r->Assign(8, new Val(CNTS.A, TYPE_COUNT));
-    r->Assign(9, new Val(CNTS.AAAA, TYPE_COUNT));
-    r->Assign(10, new Val(CNTS.NS, TYPE_COUNT));
-    r->Assign(11, new Val(CNTS.CNAME, TYPE_COUNT));
-
-    r->Assign(12, new Val(CNTS.PTR, TYPE_COUNT));
-    r->Assign(13, new Val(CNTS.SOA, TYPE_COUNT));
-    r->Assign(14, new Val(CNTS.MX, TYPE_COUNT));
-    r->Assign(15, new Val(CNTS.TXT, TYPE_COUNT));
-    r->Assign(16, new Val(CNTS.SRV, TYPE_COUNT));
-    r->Assign(17, new Val(CNTS.other, TYPE_COUNT));
-
-    r->Assign(18, new Val(CNTS.TCP, TYPE_COUNT));
-    r->Assign(19, new Val(CNTS.UDP, TYPE_COUNT));
-    r->Assign(20, new Val(CNTS.TSIG, TYPE_COUNT));
-    r->Assign(21, new Val(CNTS.EDNS, TYPE_COUNT));
-    r->Assign(22, new Val(CNTS.RD, TYPE_COUNT));
-    r->Assign(23, new Val(CNTS.DO, TYPE_COUNT));
-    r->Assign(24, new Val(CNTS.CD, TYPE_COUNT));
-    r->Assign(25, new Val(CNTS.V4, TYPE_COUNT));
-    r->Assign(26, new Val(CNTS.V6, TYPE_COUNT));
-
-    r->Assign(27, new Val(CNTS.OpQuery, TYPE_COUNT));
-    r->Assign(28, new Val(CNTS.OpIQuery, TYPE_COUNT));
-    r->Assign(29, new Val(CNTS.OpStatus, TYPE_COUNT));
-    r->Assign(30, new Val(CNTS.OpNotify, TYPE_COUNT));
-    r->Assign(31, new Val(CNTS.OpUpdate, TYPE_COUNT));
-    r->Assign(32, new Val(CNTS.OpUnassigned, TYPE_COUNT));
-
-    r->Assign(33, new Val(CNTS.rcode_noerror, TYPE_COUNT));
-    r->Assign(34, new Val(CNTS.rcode_format_err, TYPE_COUNT));
-    r->Assign(35, new Val(CNTS.rcode_server_fail, TYPE_COUNT));
-    r->Assign(36, new Val(CNTS.rcode_nxdomain, TYPE_COUNT));
-    r->Assign(37, new Val(CNTS.rcode_not_impl, TYPE_COUNT));
-    r->Assign(38, new Val(CNTS.rcode_refused, TYPE_COUNT));
-
-    r->Assign(39, new Val(CNTS.logged, TYPE_COUNT));
-
-    uint qlen = CNTS.qlen ? CNTS.qlen / CNTS.request : 0;
-    uint rlen = CNTS.rlen ? CNTS.rlen / (CNTS.reply + CNTS.rejected) : 0;
-
-    r->Assign(40, new Val(qlen, TYPE_COUNT));
-    r->Assign(41, new Val(rlen, TYPE_COUNT));
-
-    r->Assign(42, new Val(CNTS.clients, TYPE_COUNT));
-    r->Assign(43, new Val(CNTS.zones, TYPE_COUNT));
-    r->Assign(44, new Val(CNTS.qlen/1048576.0, TYPE_DOUBLE));
-    r->Assign(45, new Val(CNTS.rlen/1048576.0, TYPE_DOUBLE));
-    r->Assign(46, new Val((CNTS.qlen+CNTS.rlen)/1048576.0, TYPE_DOUBLE));
-
-    vl->append(r);
-    mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
-  }
-  // Clear counters
-  memset(&CNTS, 0, sizeof(CurCounts));
-}
-
-RecordVal*  __dns_telemetry_get_totals(double ts) {
-  RecordVal* r = new RecordVal(dns_telemetry_counts);
-
-  r->Assign(0, new Val(ts, TYPE_DOUBLE));
-  r->Assign(1, new Val(0, TYPE_DOUBLE));
-  r->Assign(2, new Val(TOTALS.request, TYPE_COUNT));
-  r->Assign(3, new Val(TOTALS.rejected, TYPE_COUNT));
-  r->Assign(4, new Val(TOTALS.reply, TYPE_COUNT));
-  r->Assign(5, new Val(TOTALS.non_dns_request, TYPE_COUNT));
-
-  r->Assign(6, new Val(TOTALS.ANY_RD, TYPE_COUNT));
-
-  r->Assign(7, new Val(TOTALS.ANY, TYPE_COUNT));
-  r->Assign(8, new Val(TOTALS.A, TYPE_COUNT));
-  r->Assign(9, new Val(TOTALS.AAAA, TYPE_COUNT));
-  r->Assign(10, new Val(TOTALS.NS, TYPE_COUNT));
-  r->Assign(11, new Val(TOTALS.CNAME, TYPE_COUNT));
-
-  r->Assign(12, new Val(TOTALS.PTR, TYPE_COUNT));
-  r->Assign(13, new Val(TOTALS.SOA, TYPE_COUNT));
-  r->Assign(14, new Val(TOTALS.MX, TYPE_COUNT));
-  r->Assign(15, new Val(TOTALS.TXT, TYPE_COUNT));
-  r->Assign(16, new Val(TOTALS.SRV, TYPE_COUNT));
-  r->Assign(17, new Val(TOTALS.other, TYPE_COUNT));
-
-  r->Assign(18, new Val(TOTALS.TCP, TYPE_COUNT));
-  r->Assign(19, new Val(TOTALS.UDP, TYPE_COUNT));
-  r->Assign(20, new Val(TOTALS.TSIG, TYPE_COUNT));
-  r->Assign(21, new Val(TOTALS.EDNS, TYPE_COUNT));
-  r->Assign(22, new Val(TOTALS.RD, TYPE_COUNT));
-  r->Assign(23, new Val(TOTALS.DO, TYPE_COUNT));
-  r->Assign(24, new Val(TOTALS.CD, TYPE_COUNT));
-  r->Assign(25, new Val(TOTALS.V4, TYPE_COUNT));
-  r->Assign(26, new Val(TOTALS.V6, TYPE_COUNT));
-
-  r->Assign(27, new Val(TOTALS.OpQuery, TYPE_COUNT));
-  r->Assign(28, new Val(TOTALS.OpIQuery, TYPE_COUNT));
-  r->Assign(29, new Val(TOTALS.OpStatus, TYPE_COUNT));
-  r->Assign(30, new Val(TOTALS.OpNotify, TYPE_COUNT));
-  r->Assign(31, new Val(TOTALS.OpUpdate, TYPE_COUNT));
-  r->Assign(32, new Val(TOTALS.OpUnassigned, TYPE_COUNT));
-
-  r->Assign(33, new Val(TOTALS.rcode_noerror, TYPE_COUNT));
-  r->Assign(34, new Val(TOTALS.rcode_format_err, TYPE_COUNT));
-  r->Assign(35, new Val(TOTALS.rcode_server_fail, TYPE_COUNT));
-  r->Assign(36, new Val(TOTALS.rcode_nxdomain, TYPE_COUNT));
-  r->Assign(37, new Val(TOTALS.rcode_not_impl, TYPE_COUNT));
-  r->Assign(38, new Val(TOTALS.rcode_refused, TYPE_COUNT));
-  r->Assign(39, new Val(TOTALS.logged, TYPE_COUNT));
-
-  // THIS ISN'T MEANINGFUL ... Just emitting so that we don't die 
-  uint qlen = CNTS.qlen ? CNTS.qlen / CNTS.request : 0;
-  uint rlen = CNTS.rlen ? CNTS.rlen / (CNTS.reply + CNTS.rejected) : 0;
-
-  r->Assign(40, new Val(qlen, TYPE_COUNT));
-  r->Assign(41, new Val(rlen, TYPE_COUNT));
-
-  r->Assign(42, new Val(TOTALS.clients, TYPE_COUNT));
-  r->Assign(43, new Val(TOTALS.zones, TYPE_COUNT));
-  // NOT MEANINGFUL ... new total time and to keep track of total rlen/qlen
-  r->Assign(44, new Val(TOTALS.qlen/1048576.0, TYPE_DOUBLE));
-  r->Assign(45, new Val(TOTALS.rlen/1048576.0, TYPE_DOUBLE));
-  r->Assign(46, new Val((TOTALS.qlen+TOTALS.rlen)/1048576.0, TYPE_DOUBLE));
-
-  return r;
-}
-
-void __dns_telemetry_fire_totals(double ts) {
-  if ( dns_telemetry_totals ) {
-    val_list* vl = new val_list;
-    vl->append(__dns_telemetry_get_totals(ts));
-    mgr.Dispatch(new Event(dns_telemetry_totals, vl), true);
-  } 
-}
-
-void __dns_telemetry_fire_anyrd(double ts) {
-  if ( dns_telemetry_anyrd_info ) {
-    int len = telemetry_anyrd_counts.Length();
-    if (len > 0) {
-      IterCookie* c = telemetry_anyrd_counts.InitForIteration();
-      HashKey* k;
-      int* val;
-      while ((val = telemetry_anyrd_counts.NextEntry(k, c)))
-	{
-	  char* key =  (char*)k->Key();
-	  int key_size =  k->Size();
-	  // @componentry. NOT SAFE. FIX THIS. 
-	  // Making copy because of use of STRTOK which is destructive.	  
-	  char anyrd_key[600];
-	  strncpy(anyrd_key, key, key_size);
-	  anyrd_key[key_size] = 0;
-	  char seps[] = "|";
-	  char* ip = strtok(anyrd_key, seps );
-	  char* qname = strtok( NULL, seps);
-	  RecordVal* r = new RecordVal(dns_telemetry_anyrd_stats);
-	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
-	  r->Assign(1, new StringVal(ip));
-	  r->Assign(2, new StringVal(qname));
-	  r->Assign(3, new Val(*val, TYPE_COUNT));
-	  val_list* vl = new val_list;
-	  vl->append(r);
-	  mgr.Dispatch(new Event(dns_telemetry_anyrd_info, vl), true);
-	}
-      telemetry_anyrd_counts.Clear();
-    } else {
-      // Always emit an empty record for consistency and to ensure a file exists for the interval
-      RecordVal* r = new RecordVal(dns_telemetry_anyrd_stats);
-      r->Assign(0, new Val(ts, TYPE_DOUBLE));
-      r->Assign(1, new StringVal(""));
-      r->Assign(2, new StringVal(""));
-      r->Assign(3, new Val(0, TYPE_COUNT));
-      val_list* vl = new val_list;
-      vl->append(r);
-      mgr.Dispatch(new Event(dns_telemetry_anyrd_info, vl), true);
-    }
-  }
-}
-
-void __dns_telemetry_fire_clients(double ts) {
-  if ( dns_telemetry_client_info ) {
-    int len = telemetry_client_stats.Length();
-    if (len > 0) {
-      IterCookie* client_c = telemetry_client_stats.InitForIteration();
-      HashKey* client_k;
-      int* client_v;
-      while ((client_v = telemetry_client_stats.NextEntry(client_k, client_c)))
-	{
-	  char* key =  (char*)client_k->Key();
-	  RecordVal* r = new RecordVal(dns_telemetry_client_stats);
-	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
-	  r->Assign(1, new StringVal(key));
-	  r->Assign(2, new Val(*client_v, TYPE_COUNT));
-	  val_list* vl = new val_list;
-	  vl->append(r);
-	  mgr.Dispatch(new Event(dns_telemetry_client_info, vl), true);
-	} 
-      telemetry_client_stats.Clear();
-    }
-    else {
-      // Always emit an empty record for consistency and to ensure a file exists for the interval
-      RecordVal* r = new RecordVal(dns_telemetry_client_stats);
-      r->Assign(0, new Val(ts, TYPE_DOUBLE));
-      r->Assign(1, new StringVal(""));
-      r->Assign(2, new Val(0, TYPE_COUNT));
-      val_list* vl = new val_list;
-      vl->append(r);
-      mgr.Dispatch(new Event(dns_telemetry_client_info, vl), true);
-    }
-  }
-}
-
-FILE* file_rotate(const char* name, const char* to_name)
-{
-  // Build file names.
-  const int buflen = strlen(name) + 128;
-  char tmpname[buflen], newname[buflen+4];
-  safe_snprintf(newname, buflen, "%s", to_name);
-  newname[buflen-1] = '\0';
-  strcpy(tmpname, newname);
-  strcat(tmpname, ".tmp");
-
-  // First open the new file using a temporary name.
-  FILE* newf = fopen(tmpname, "w");
-  if ( ! newf ) {
-    fprintf(stderr, "file_rotate (open): can't open %s: %s\n", tmpname, strerror(errno));
-    return 0;
-  }
-
-  // Then move old file to and make sure it really gets created.
-  struct stat dummy;
-  if ( link(name, newname) < 0 || stat(newname, &dummy) < 0 ) {
-    fprintf(stderr, "file_rotate (move): can't move %s to %s: %s\n", name, newname, strerror(errno));
-    fclose(newf);
-    unlink(newname);
-    unlink(tmpname);
-    return 0;
-  }
-
-  // Close current file, and move the tmp to its place.
-  if ( unlink(name) < 0 || link(tmpname, name) < 0 || unlink(tmpname) < 0 ) {
-    reporter->Error("file_rotate (close): can't move %s to %s: %s\n", tmpname, name, strerror(errno));
-    exit(1);	// hard to fix, but shouldn't happen anyway...
-  }
-
-  fclose(newf);
-  return 0;
-  // return newf;
-}
-
-// #define ROTATE_LOGGING 
-
-void __dns_telemetry_fire_details(double ts, bool terminating) {
-
-  // How we deal with synchronous, manual rotation.
-  // Special case for high-perf writing scenarios (> 200K QPS)
-  static char buf[256];
-  static char rotate_fname[256];
-  static char source_fname[256];
-  time_t time = (time_t) ts-59;; // ugly. We're getting called @ the 59'th
-  strftime(buf, sizeof(buf), "%y-%m-%d_%H.%M.%S", localtime(&time));
-
-  IterCookie* cookie = DETAIL_LOGGER_INFO.InitForIteration();
-  HashKey* key;
-  OwnerStats* info;
-  DetailLogInfo* logger;
-  int i = 0;
-  bool common_rotated = false;
-  PDict(int) owners;
-
-  while ((logger = DETAIL_LOGGER_INFO.NextEntry(key, cookie))) {
-
-    char* root_fname = logger->fname;
-
-    bool enabled = logger->enabled;
-
-    switch  (logger->log_id) 
-      {
-      case 1:
-	{
-	  // Multi Zone
-	  sprintf(source_fname, "%s-O-%08d.log", root_fname, logger->owner_id);
-	  sprintf(rotate_fname, "%s-O-%08d-%s.log", root_fname, logger->owner_id, buf);
-	  break;
-	}
-      case 2:
-	{
-	  // Single Zone
-	  sprintf(source_fname, "%s-Z-%08d.log", root_fname, logger->zone_id);
-	  sprintf(rotate_fname, "%s-Z-%08d-%s.log", root_fname, logger->zone_id, buf);
-	  break;
-	}
-      case 3:
-	{
-	  // Common
-	  sprintf(source_fname, "%s-00000000.log", root_fname);
-	  sprintf(rotate_fname, "%s-00000000-%s.log", root_fname, buf);
-	  break;
-	}
-      }
-
-    // See if we've processed this owner yet. 
-    HashKey* owner_key = new HashKey(source_fname);
-    DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(owner_key);
-    int* rotated_by = owners.Lookup(owner_key);
-
-#ifdef ROTATE_LOGGING
-    fprintf(stderr, "Processing logid=%d owner=%d zone=%d rotated=%p file=%p open_logger=%p\n", logger->log_id, logger->owner_id, logger->zone_id, rotated_by, logger->file, open_logger);
-#endif
-
-    FILE* newf = 0;
-
-    // Rotate
-    if (logger->file != 0) {
-
-      if (rotated_by == NULL) {
-	logger->file->Flush();
-	logger->file->Close();
-#ifdef ROTATE_LOGGING
-	fprintf(stderr, "  Rotating %s => %s logger=%p\n", source_fname, rotate_fname, logger);
-#endif
-	newf = file_rotate(source_fname, rotate_fname);
-	
-	if (logger->log_id == 1) {
-	  // Remember the fact that we've already rotated for this Multi-Zone file
-	  owners.Insert(owner_key, new int(logger->zone_id));
-	} else if (logger->log_id == 3) {
-	  // Remember the fact that we've already rotated for the Multi-Customer/Zone (Common) file
-	  common_rotated = true;
-	}
-      } else {
-#ifdef ROTATE_LOGGING
-	fprintf(stderr, "  Ignoring %s, already rotated via zoneid=%d\n", source_fname, *rotated_by);
-#endif
-	// Previous rotation will have cleaned this dangling pointer up. Ugly. :-(
-	logger->file = 0;
-      }
-
-    } else if (logger->log_id == 3) {
-
-      // No open file. Creating empty Common details. 
-      // TODO: Consider tracking the number of active zones being common logged. If > 1 then create empty.
-      if (!common_rotated) {
-#ifdef ROTATE_LOGGING
-	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
-#endif
-	FILE* f = fopen(rotate_fname, "wb");
-	fclose(f);
-	common_rotated = true;
-#ifdef ROTATE_LOGGING
-      } else {
-	fprintf(stderr, "  Common already rotated\n");
-#endif
-      }
-
-    } else if (logger->log_id == 2) {
-
-      // Single Zone
-#ifdef ROTATE_LOGGING
-      fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
-#endif
-      FILE* f = fopen(rotate_fname, "wb");
-      fclose(f);
-    }
-    else if (logger->log_id == 1) {
-
-      // Multi-Zone -- we may have already rotated. No need to create if that's the case.
-      if (rotated_by != NULL) {
-#ifdef ROTATE_LOGGING
-	fprintf(stderr, "  NOT creating empty details for %s, already rotated/created zoneid=%d\n", rotate_fname, *rotated_by);
-#endif
-      } else {
-#ifdef ROTATE_LOGGING
-	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
-#endif
-	FILE* f = fopen(rotate_fname, "wb");
-	fclose(f);
-	owners.Insert(owner_key, new int(logger->zone_id));
-      }
-
-    }
-      
-    if (!terminating) {
-      if (logger->file != NULL) {
-	delete logger->file;
-	logger->file = NULL;
-	HashKey* open_logger_key = new HashKey(source_fname);
-	DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
-	if (open_logger != NULL) {
-#ifdef ROTATE_LOGGING
-	  fprintf(stderr, "  Removing open logger info %s\n", source_fname);
-#endif
-	  DETAIL_LOGGER_OPEN.Remove(open_logger_key);
-	}
-	delete open_logger_key;
-      }
-	
-      // Only reopen if we're still logging 
-      if (!enabled) {
-	logger->file = NULL;
-#ifdef ROTATE_LOGGING
-	fprintf(stderr, "  Not opening logger file, now not logging for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
-#endif
-	unlink(source_fname);
-      } else {
-	if (logger->log_id == 2) {
-	  // TODO What if we can't open the file? Permissions, etc...
-	  FILE* f = fopen(source_fname, "wb");
-	  logger->file = new BroFile(f);
-#ifdef ROTATE_LOGGING
-	  fprintf(stderr, "  Opening new logger source=%s file=%p\n", source_fname, logger->file);
-#endif
-	}
-      }
-    } else {
-      unlink(source_fname);
-    }
-
-    delete owner_key;
-  }
-  owners.Clear();
-}
-
-void __dns_telemetry_fire_owners(double ts) {
-  if (dns_telemetry_owner_info) {
-    
-    int len = OWNER_INFO.Length();
-    if (len > 0) {
-
-      IterCookie* cookie = OWNER_INFO.InitForIteration();
-      HashKey* key;
-      OwnerStats* info;
-      while ((info = OWNER_INFO.NextEntry(key, cookie))) {
-	RecordVal* r = new RecordVal(dns_telemetry_owner_stats);
-	r->Assign(0, new Val(ts, TYPE_DOUBLE));
-	r->Assign(1, new Val(info->id, TYPE_COUNT));
-	r->Assign(2, new Val(info->cnt, TYPE_COUNT));
-	val_list* vl = new val_list;
-	vl->append(r);
-	mgr.Dispatch(new Event(dns_telemetry_owner_info, vl), true);
-      }
-      OWNER_INFO.Clear();
-
-    } else {
-      // Always emit an empty record for consistency and to ensure a file exists for the interval
-      RecordVal* r = new RecordVal(dns_telemetry_owner_stats);
-      r->Assign(0, new Val(ts, TYPE_DOUBLE));
-      r->Assign(1, new Val(0, TYPE_COUNT));
-      r->Assign(2, new Val(0, TYPE_COUNT));
-      val_list* vl = new val_list;
-      vl->append(r);
-      mgr.Dispatch(new Event(dns_telemetry_owner_info, vl), true);
-    }
-  }
-}
-
-void __dns_telemetry_fire_zones(double ts) {
-  if ( dns_telemetry_zone_info ) {
-    int len = telemetry_zone_stats.Length();
-    if (len > 0) {
-      IterCookie* zone_cookie = telemetry_zone_stats.InitForIteration();
-      HashKey* zone_k;
-      ZoneStats* zv;
-      int cnt = 0;
-      while ((zv = telemetry_zone_stats.NextEntry(zone_k, zone_cookie)))
-	{
-	  // Do we need to free each entry (not key) as we iterate?
-	  RecordVal* r = new RecordVal(dns_telemetry_zone_stats);
-	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
-	  r->Assign(1, new StringVal(zv->key));
-	  r->Assign(2, new Val(zv->zone_id, TYPE_COUNT));
-	  r->Assign(3, new Val(zv->owner_id, TYPE_COUNT));
-	  r->Assign(4, new Val(zv->cnt, TYPE_COUNT));
-	  r->Assign(5, new Val(zv->A, TYPE_COUNT));
-	  r->Assign(6, new Val(zv->AAAA, TYPE_COUNT));
-	  r->Assign(7, new Val(zv->CNAME, TYPE_COUNT));
-	  r->Assign(8, new Val(zv->NS, TYPE_COUNT));
-	  r->Assign(9, new Val(zv->SOA, TYPE_COUNT));
-	  r->Assign(10, new Val(zv->SRV, TYPE_COUNT));
-	  r->Assign(11, new Val(zv->TXT, TYPE_COUNT));
-	  r->Assign(12, new Val(zv->MX, TYPE_COUNT));
-	  r->Assign(13, new Val(zv->DO, TYPE_COUNT));
-	  r->Assign(14, new Val(zv->RD, TYPE_COUNT));
-	  r->Assign(15, new Val(zv->other, TYPE_COUNT));
-	  r->Assign(16, new Val(zv->NOERROR, TYPE_COUNT));
-	  r->Assign(17, new Val(zv->REFUSED, TYPE_COUNT));
-	  r->Assign(18, new Val(zv->NXDOMAIN, TYPE_COUNT));
-	  val_list* vl = new val_list;
-	  vl->append(r);
-	  mgr.Dispatch(new Event(dns_telemetry_zone_info, vl), true);
-	}
-      telemetry_zone_stats.Clear();
-    } else {
-      // Always emit an empty record for consistency and to ensure a file exists for the interval
-      RecordVal* r = new RecordVal(dns_telemetry_zone_stats);
-      r->Assign(0, new Val(ts, TYPE_DOUBLE));
-      r->Assign(1, new StringVal(""));
-      r->Assign(2, new Val(0, TYPE_COUNT));
-      r->Assign(3, new Val(0, TYPE_COUNT));
-      r->Assign(4, new Val(0, TYPE_COUNT));
-      r->Assign(5, new Val(0, TYPE_COUNT));
-      r->Assign(6, new Val(0, TYPE_COUNT));
-      r->Assign(7, new Val(0, TYPE_COUNT));
-      r->Assign(8, new Val(0, TYPE_COUNT));
-      r->Assign(9, new Val(0, TYPE_COUNT));
-      r->Assign(10, new Val(0, TYPE_COUNT));
-      r->Assign(11, new Val(0, TYPE_COUNT));
-      r->Assign(12, new Val(0, TYPE_COUNT));
-      r->Assign(13, new Val(0, TYPE_COUNT));
-      r->Assign(14, new Val(0, TYPE_COUNT));
-      r->Assign(15, new Val(0, TYPE_COUNT));
-      r->Assign(16, new Val(0, TYPE_COUNT));
-      r->Assign(17, new Val(0, TYPE_COUNT));
-      r->Assign(18, new Val(0, TYPE_COUNT));
-      val_list* vl = new val_list;
-      vl->append(r);
-      mgr.Dispatch(new Event(dns_telemetry_zone_info, vl), true);
-    }
-
-  }
-}
-
-void __dns_telemetry_fire_qnames(double ts) {
-  if ( dns_telemetry_qname_info ) {
-    int len = 0;
-    len = telemetry_qname_stats.Length();
-    if (len > 0) {
-      IterCookie* qname_cookie = telemetry_qname_stats.InitForIteration();
-      HashKey* qname_k;
-      QnameStats* qname_v;
-      while ((qname_v = telemetry_qname_stats.NextEntry(qname_k, qname_cookie)))
-	{
-	  char* key =  (char*)qname_k->Key();
-	  RecordVal* r = new RecordVal(dns_telemetry_qname_stats);
-	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
-	  r->Assign(1, new StringVal(key));
-	  r->Assign(2, new Val(qname_v->zone_id, TYPE_COUNT));
-	  r->Assign(3, new Val(qname_v->owner_id, TYPE_COUNT));
-	  r->Assign(4, new Val(qname_v->cnt, TYPE_COUNT));
-	  r->Assign(5, new Val(qname_v->A, TYPE_COUNT));
-	  r->Assign(6, new Val(qname_v->AAAA, TYPE_COUNT));
-	  r->Assign(7, new Val(qname_v->CNAME, TYPE_COUNT));
-	  r->Assign(8, new Val(qname_v->MX, TYPE_COUNT));
-	  r->Assign(9, new Val(qname_v->SOA, TYPE_COUNT));
-	  r->Assign(10, new Val(qname_v->TXT, TYPE_COUNT));
-	  r->Assign(11, new Val(qname_v->SRV, TYPE_COUNT));
-	  r->Assign(12, new Val(qname_v->NS, TYPE_COUNT));
-	  r->Assign(13, new Val(qname_v->other, TYPE_COUNT));
-	  val_list* vl = new val_list;
-	  vl->append(r);
-	  mgr.Dispatch(new Event(dns_telemetry_qname_info, vl), true);
-	}
-      telemetry_qname_stats.Clear();
-    } 
-
-    if (len == 0) {
-      RecordVal* r = new RecordVal(dns_telemetry_qname_stats);
-      r->Assign(0, new Val(ts, TYPE_DOUBLE));
-      r->Assign(1, new StringVal(""));
-      r->Assign(2, new Val(0, TYPE_COUNT));
-      r->Assign(3, new Val(0, TYPE_COUNT));
-      r->Assign(4, new Val(0, TYPE_COUNT));
-      r->Assign(5, new Val(0, TYPE_COUNT));
-      r->Assign(6, new Val(0, TYPE_COUNT));
-      r->Assign(7, new Val(0, TYPE_COUNT));
-      r->Assign(8, new Val(0, TYPE_COUNT));
-      r->Assign(9, new Val(0, TYPE_COUNT));
-      r->Assign(10, new Val(0, TYPE_COUNT));
-      r->Assign(11, new Val(0, TYPE_COUNT));
-      r->Assign(12, new Val(0, TYPE_COUNT));
-      r->Assign(13, new Val(0, TYPE_COUNT));
-      val_list* vl = new val_list;
-      vl->append(r);
-      mgr.Dispatch(new Event(dns_telemetry_qname_info, vl), true);
-    }
-  }
-}
-
-void ReverseQname(char *string, int length) 
-{
-  int c;
-  char *begin, *end, temp;
- 
-  begin = string;
-  end = string;
- 
-  for ( c = 0 ; c < ( length - 1 ) ; c++ )
-    end++;
- 
-  for ( c = 0 ; c < length/2 ; c++ ) 
-    {        
-      temp = *end;
-      *end = *begin;
-      *begin = temp;
- 
-      begin++;
-      end--;
-    }
-}
 
 int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 					     const u_char*& data, int& len,
@@ -1132,31 +466,6 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
   char tlz [255];
   u_char* name_end;
-
-  // Get the QNAME. 
-  //
-  // @componentry
-  //
-  // NOTES as of March 7 2014 @
-  //
-  // THIS CODE MUST CHANGE IN ORDER TO CALCULATE THE TLZ (Top Level Zone)
-  // We associate subsequent summarization with.
-  // Need to integrate the code from Rick that determines the LONGEST path
-  // and not the SHORTEST path as ExtractName does.
-  //
-  // key_host and key_zone are not used (yet). They may be used as more efficient
-  // hash keys when using sorted skip lists. They key_zone and key_host 
-  // are reversed:
-  //
-  // www.example.com => 
-  //
-  //    name = www.example.com
-  //    tlz = example.com
-  //    key_host = comexamplewww
-  //    key_zone = comexample
-  //
-  // ExtractName performs this work while decoding the raw labels in the DNS packet.
-  //
 
   name_end = ExtractName(data, len, name, name_len, msg_start, tlz);
 
@@ -1178,8 +487,13 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
   if (do_zone_stats && dns_telemetry_zone_info) {
 
+#ifdef UNORDERED_MAP
+    unordered_map<string,ZoneInfo*>::const_iterator got = zone_info.find(tlz);
+    zinfo = got == zone_info.end() ? NULL : got->second;
+#else
     zinfo = telemetry_zone_info.Lookup(zone_hash);
-	    
+#endif
+
     bro_int_t owner_id = 0;
 
     if (!zinfo) {
@@ -1189,39 +503,11 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       HashKey* other_hash = new HashKey(other);
       zv = telemetry_zone_stats.Lookup(other_hash);
       zone_hash = other_hash;
-      /*
-      if (do_owner_stats && is_query) {
-	HashKey* key = new HashKey((bro_int_t)0);
-	owner_stats = OWNER_INFO.Lookup(key);
-	if (owner_stats == 0) {
-	  owner_stats = new OwnerStats();
-	  owner_stats->id = 0;
-	  owner_stats->cnt = 0;
-	  OWNER_INFO.Insert(key, owner_stats);
-	}
-	++owner_stats->cnt;
-	delete key;
-      }
-      */
     } else {
 
       zv = telemetry_zone_stats.Lookup(zone_hash);
       do_zone_details = zinfo->details;
       owner_id = (bro_int_t)zinfo->owner_id;
-      /*
-      if (do_owner_stats && is_query) {
-	HashKey* key = new HashKey((bro_int_t)zinfo->owner_id);
-	owner_stats = OWNER_INFO.Lookup(key);
-	if (owner_stats == 0) {
-	  owner_stats = new OwnerStats();
-	  owner_stats->id = zinfo->owner_id;
-	  owner_stats->cnt = 0;
-	  OWNER_INFO.Insert(key, owner_stats);
-	}
-	delete key;
-	++owner_stats->cnt;
-      }
-      */
     }
 
     if (do_owner_stats && is_query) {
@@ -1405,7 +691,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	      char anyrd_key[560];
 	      sprintf(anyrd_key, "%s|%s", sAddr.c_str(), name);
 	      HashKey* anyrd_hash = new HashKey(anyrd_key);
-	      //		    fprintf(stderr, "ANYRD key=%s len=%u hash_key=%s key_size=%d\n", anyrd_key, (unsigned int)strlen(anyrd_key), (const char*)anyrd_hash->Key(), anyrd_hash->Size());
+	      // fprintf(stderr, "ANYRD key=%s len=%u hash_key=%s key_size=%d\n", anyrd_key, (unsigned int)strlen(anyrd_key), (const char*)anyrd_hash->Key(), anyrd_hash->Size());
 	      int* count_idx = telemetry_anyrd_counts.Lookup(anyrd_hash);
 	      if (count_idx) {
 		++(*count_idx);
@@ -1476,7 +762,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  logger->ts = network_time;
 	  logger->enabled = true;
 	  // Use the base multi-tenant logger's root
-	  logger->fname = DEFAULT_DETAILS;
+	  logger->fname = DETAIL_DEFAULT_PATH;
 	  DETAIL_LOGGER_INFO.Insert(log_key, logger);
 	}
 	delete log_key;
@@ -1535,7 +821,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	      logger->file = open_logger->file;
 	    } else {
 	      FILE* f = fopen(source_fname, "wb");
-	      logger->file = new BroFile(f);
+	      logger->file = new BroFile(f, source_fname, "wb");
 	      DETAIL_LOGGER_OPEN.Insert(open_logger_key, logger);
 	      // fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
 	    }
@@ -1543,7 +829,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
 	  } else {
 	    FILE* f = fopen(source_fname, "wb");
-	    logger->file = new BroFile(f);
+	    logger->file = new BroFile(f, source_fname, "wb");
 	    fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
 	  }
 	}
@@ -1641,8 +927,6 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 	msg->aclass = ExtractShort(data, len);
 	msg->ttl = ExtractLong(data, len);
 
-	fprintf(stderr, " ttl=%d\n", msg->ttl);
-
 	int rdlength = ExtractShort(data, len);
 	if ( rdlength > len )
 		{
@@ -1653,50 +937,6 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 
 	int status;
 	switch ( msg->atype ) {
-	  /*
-		case TYPE_A:
-			status = ParseRR_A(msg, data, len, rdlength);
-			break;
-
-		case TYPE_A6:
-		case TYPE_AAAA:
-			status = ParseRR_AAAA(msg, data, len, rdlength);
-			break;
-
-		case TYPE_NS:
-		case TYPE_CNAME:
-		case TYPE_PTR:
-			status = ParseRR_Name(msg, data, len, rdlength, msg_start);
-			break;
-
-		case TYPE_SOA:
-			status = ParseRR_SOA(msg, data, len, rdlength, msg_start);
-			break;
-
-		case TYPE_WKS:
-			status = ParseRR_WKS(msg, data, len, rdlength);
-			break;
-
-		case TYPE_HINFO:
-			status = ParseRR_HINFO(msg, data, len, rdlength);
-			break;
-
-		case TYPE_MX:
-			status = ParseRR_MX(msg, data, len, rdlength, msg_start);
-			break;
-
-		case TYPE_TXT:
-			status = ParseRR_TXT(msg, data, len, rdlength, msg_start);
-			break;
-
-		case TYPE_NBS:
-			status = ParseRR_NBS(msg, data, len, rdlength, msg_start);
-			break;
-
-		case TYPE_SRV:
-			status = ParseRR_SRV(msg, data, len, rdlength, msg_start);
-			break;
-	  */
 		case TYPE_EDNS:
 			status = ParseRR_EDNS(msg, data, len, rdlength, msg_start);
 			break;
@@ -1706,7 +946,6 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 			break;
 
 		default:
-			analyzer->Weird("DNS_RR_unknown_type");
 			data += rdlength;
 			len -= rdlength;
 			status = 1;
@@ -1763,16 +1002,25 @@ u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
     } else {
       do
 	{
+#ifdef UNORDERED_MAP
+	  unordered_map<string,ZoneInfo*>::const_iterator got = zone_info.find(pSearch);
+	  ZoneInfo* zinfo = got == zone_info.end() ? NULL : got->second;
+#else
 	  HashKey *key = new HashKey(pSearch);
 	  ZoneInfo* zinfo = telemetry_zone_info.Lookup(key);
+#endif
 	  if (zinfo != 0) {
 	    // We're done.
 	    match = true;
 	    strcpy(tlz, pSearch);
+#ifndef UNORDERED_MAP
 	    delete key;
+#endif
 	    break;
 	  } else {
+#ifndef UNORDERED_MAP
 	    delete key;
+#endif
 	    pSearch = ::strchr(pSearch, '.');
 	  }
 	}
@@ -2194,24 +1442,20 @@ int DNS_Telemetry_Interpreter::ParseRR_WKS(DNS_Telemetry_MsgInfo* msg,
 
 int DNS_Telemetry_Interpreter::ParseRR_HINFO(DNS_Telemetry_MsgInfo* msg,
 				const u_char*& data, int& len, int rdlength)
-	{
-	data += rdlength;
-	len -= rdlength;
-	return 1;
-	}
+{
+  data += rdlength;
+  len -= rdlength;
+  return 1;
+}
 
 int DNS_Telemetry_Interpreter::ParseRR_TXT(DNS_Telemetry_MsgInfo* msg,
 				const u_char*& data, int& len, int rdlength,
 				const u_char* msg_start)
-	{
-	  //// 	int name_len = data[0];
-	  //// 	char* name = new char[name_len];
-	  //// 	memcpy(name, data+1, name_len);
-
-	data += rdlength;
-	len -= rdlength;
-	return 1;
-	}
+{
+  data += rdlength;
+  len -= rdlength;
+  return 1;
+}
 
 void DNS_Telemetry_Interpreter::SendReplyOrRejectEvent(DNS_Telemetry_MsgInfo* msg,
 						EventHandlerPtr event,
@@ -2538,16 +1782,826 @@ void DNS_Telemetry_Analyzer::ConnectionClosed(tcp::TCP_Endpoint* endpoint, tcp::
 	}
 
 void DNS_Telemetry_Analyzer::ExpireTimer(double t)
+{
+  // The - 1.0 in the following is to allow 1 second for the
+  // common case of a single request followed by a single reply,
+  // so we don't needlessly set the timer twice in that case.
+  if ( t - Conn()->LastTime() >= dns_session_timeout - 1.0 || terminating )
+    {
+      Event(connection_timeout);
+      sessions->Remove(Conn());
+    }
+  else
+    ADD_ANALYZER_TIMER(&DNS_Telemetry_Analyzer::ExpireTimer,
+		       t + dns_session_timeout, 1, TIMER_DNS_EXPIRE);
+}
+
+void __dns_telemetry_zone_info_list() {
+
+  // Dump the zone map
+  IterCookie* c = telemetry_zone_info.InitForIteration();
+  HashKey* k;
+  ZoneInfo* val;
+  uint size = DETAIL_LOGGER_INFO.MemoryAllocation();
+  int loggers = DETAIL_LOGGER_INFO.Length();
+  int len = telemetry_zone_info.Length();
+  fprintf(stderr,"Config @ %f - Zone Info len=%d size=%u loggers=%d\n", current_time(),len, size, loggers);
+}
+
+
+int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
+
+  // Config the common logger (logid=3, owner_id=0)
+  DetailLogInfo* common_logger;
+  HashKey* key = new HashKey((bro_int_t)0);
+  if (DETAIL_LOGGER_INFO.Length() == 0 && details_fname != NULL) {
+    common_logger = new DetailLogInfo();
+    strcpy(DETAIL_DEFAULT_PATH, details_fname);
+    common_logger->fname = DETAIL_DEFAULT_PATH;
+    common_logger->owner_id = 0;
+    common_logger->enabled = false;
+    common_logger->log_id = 3;
+    if (common_logger->file != 0) {
+      delete common_logger->file;
+    }
+    common_logger->file = NULL;
+    common_logger->log_id = 3;
+    common_logger->ts = network_time;
+    DETAIL_LOGGER_INFO.Insert(key, common_logger);
+  } else {
+    common_logger = DETAIL_LOGGER_INFO.Lookup(key);
+  }
+  delete key;
+
+
+  double start = current_time();
+  struct stat buf;
+  stat(fname, &buf);
+  int size = buf.st_size;
+  strcpy(ZONE_MAP_INFO.fname, fname);
+  ZONE_MAP_INFO.last_mod = buf.st_mtime;
+  static char timestr[256];
+  strftime(timestr, sizeof(timestr), "%Y%m%dT%H%M%S", localtime(&ZONE_MAP_INFO.last_mod));
+  fprintf(stderr, "%f set_zones.start %s %d %s\n", start, fname, size, timestr);
+
+  FILE* f = fopen(fname, "rt");
+
+  if (f == NULL) {
+    fprintf(stderr,"ERROR: Invalid zone config file: %s\n", fname);
+    return 0;
+  } else {
+    ssize_t read;
+    size_t len = 0;
+    uint cnt = 0;
+    uint change = 0;
+    uint add = 0;
+    char line [128];
+    while ( fgets ( line, sizeof line, f) != NULL ) {
+      if (line[0] == '#') 
+	  continue;
+      ++cnt;
+
+      // Raw processing speed for now. No error checking whatsoever. Get the config file right! ^_^
+      char *array[7];
+      uint i = 0;
+      char *p = strtok (line,"\t");  
+      while (p != NULL)
 	{
-	// The - 1.0 in the following is to allow 1 second for the
-	// common case of a single request followed by a single reply,
-	// so we don't needlessly set the timer twice in that case.
-	if ( t - Conn()->LastTime() >= dns_session_timeout - 1.0 || terminating )
-		{
-		Event(connection_timeout);
-		sessions->Remove(Conn());
-		}
-	else
-		ADD_ANALYZER_TIMER(&DNS_Telemetry_Analyzer::ExpireTimer,
-				t + dns_session_timeout, 1, TIMER_DNS_EXPIRE);
+	  if (i > 6)
+	    break;
+	  array[i++] = p;
+	  p = strtok (NULL, "\t");
 	}
+
+      char* name = array[1];
+      int zone_id = atoi(array[2]);
+      int owner_id = atoi(array[3]);
+      int log_id = atoi(array[4]);
+      int stat_id = atoi(array[5]);
+      int qname_id = atoi(array[6]);
+
+      if (log_id > 3) {
+	fprintf(stderr, "ERROR: log_id must be either 0 (none), 1 (owner), 2 (zone) or 3 (common) logid=%d owner_id=%d zone_id=%d %s\n", log_id, owner_id, zone_id, name);
+      }
+
+      ZoneInfo* zinfo;
+#ifdef UNORDERED_MAP
+      unordered_map<string,ZoneInfo*>::const_iterator got = zone_info.find(name);
+      if (got == zone_info.end()) {
+	zinfo = new ZoneInfo();
+	zone_info.insert({name, zinfo});
+	add++;
+      } else {
+	zinfo = got->second;
+	if (zinfo->zone_id == zone_id && zinfo->log_id == log_id) {
+	  continue;
+	}
+	change++;
+      }
+#else
+      HashKey* zone_hash = new HashKey(name);
+      zinfo = telemetry_zone_info.Lookup(zone_hash);
+      if (!zinfo) {
+	zinfo = new ZoneInfo();
+	telemetry_zone_info.Insert(zone_hash, zinfo);
+      }
+      delete zone_hash;
+#endif
+
+      if (log_id != 0) {
+	fprintf(stderr, "%f zone_info %s\tzid=%d\toid=%d\tlid=%d\tsid=%d\tqid=%d\n", current_time(), name, zone_id, owner_id, log_id, stat_id, qname_id);
+      }
+
+      strcpy(zinfo->key, name);
+      zinfo->zone_id = zone_id;
+      zinfo->owner_id = owner_id;
+      zinfo->log_id = log_id;
+      zinfo->stat_id = stat_id;
+      zinfo->details = log_id != 0;
+
+      DetailLogInfo* logger = NULL;
+      HashKey* logger_key = new HashKey((bro_int_t)zinfo->zone_id);
+      logger = DETAIL_LOGGER_INFO.Lookup(logger_key);
+      delete logger_key;
+      
+      if (log_id == 0 && logger) {
+
+	// Update the logid. Could be toggling details on/off for a particular customer
+	// Owner ID can't / shouldn't change. Nor the location that we write these logs to.
+	if (logger->log_id != 0) {
+	  fprintf(stderr, "%f zone_info\t%s\tdisabling logging (was %d) zoneid=%d ownerid=%d\n", current_time(), name, logger->log_id, logger->zone_id, logger->owner_id);
+	}
+	if (logger->file != 0) {
+	  fprintf(stderr, "  pending log entries to be rotated %p %s\n", logger->file, logger->file->Name());
+	} else {
+	  fprintf(stderr, "  WARN: no pending log entries to be rotated, create file?\n");
+	}
+	logger->log_id = log_id;
+	logger->enabled = false;
+
+      } else if (log_id != 0) {
+
+	// If we don't have a logger info yet, create it.
+	if (logger == NULL) {
+	  // Create and init a DetailLogInfo structure
+	  logger = new DetailLogInfo();
+	  logger->owner_id = zinfo->owner_id;
+	  logger->log_id = zinfo->log_id;
+	  logger->zone_id = zinfo->zone_id;
+	  logger->ts = network_time;
+	  logger->enabled = true;
+      
+	  // Use the base multi-tenant logger's root
+	  logger->fname = common_logger->fname;
+	  HashKey* log_key = new HashKey((bro_int_t)zinfo->zone_id);
+	  DETAIL_LOGGER_INFO.Insert(log_key, logger);
+	  delete log_key;
+	} else {
+	  // Validate that we're not changing owner or zoneid?
+	  logger->log_id = log_id;
+	  logger->enabled = true;
+	}
+      }
+
+    }
+
+    fclose(f);
+    double diff = current_time() - start;
+    double rate = cnt / diff;
+    size_t map_size = zone_info.size();
+    uint ignored = cnt - map_size;
+#ifdef UNORDERED_MAP
+    fprintf(stderr, "%f set_zones.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
+#else
+    int map_size = telementry_zone_info.Length();
+    uint ignored = cnt - map_size;
+    fprintf(stderr, "%f set_zones.done time=%f error=%u add=%u change=%u cnt=%d %.0f\n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
+
+    if (ZONE_UPDATER == NULL) {
+      ZONE_UPDATER = new ZoneUpdater(ZONE_MAP_INFO.fname, 10);
+      ZONE_UPDATER->Start();
+    }
+
+  }
+  return 1;
+}
+
+void __dns_telemetry_fire_counts(double ts) {
+  if ( dns_telemetry_count ) {
+    val_list* vl = new val_list;
+    RecordVal* r = new RecordVal(dns_telemetry_counts);
+
+    double lag = current_time() - ts;
+    if (lag > 2) {
+      fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
+    }
+
+    r->Assign(0, new Val(ts, TYPE_DOUBLE));
+    r->Assign(1, new Val(lag, TYPE_DOUBLE));
+    r->Assign(2, new Val(CNTS.request, TYPE_COUNT));
+    r->Assign(3, new Val(CNTS.rejected, TYPE_COUNT));
+    r->Assign(4, new Val(CNTS.reply, TYPE_COUNT));
+    r->Assign(5, new Val(CNTS.non_dns_request, TYPE_COUNT));
+
+    r->Assign(6, new Val(CNTS.ANY_RD, TYPE_COUNT));
+
+    r->Assign(7, new Val(CNTS.ANY, TYPE_COUNT));
+    r->Assign(8, new Val(CNTS.A, TYPE_COUNT));
+    r->Assign(9, new Val(CNTS.AAAA, TYPE_COUNT));
+    r->Assign(10, new Val(CNTS.NS, TYPE_COUNT));
+    r->Assign(11, new Val(CNTS.CNAME, TYPE_COUNT));
+
+    r->Assign(12, new Val(CNTS.PTR, TYPE_COUNT));
+    r->Assign(13, new Val(CNTS.SOA, TYPE_COUNT));
+    r->Assign(14, new Val(CNTS.MX, TYPE_COUNT));
+    r->Assign(15, new Val(CNTS.TXT, TYPE_COUNT));
+    r->Assign(16, new Val(CNTS.SRV, TYPE_COUNT));
+    r->Assign(17, new Val(CNTS.other, TYPE_COUNT));
+
+    r->Assign(18, new Val(CNTS.TCP, TYPE_COUNT));
+    r->Assign(19, new Val(CNTS.UDP, TYPE_COUNT));
+    r->Assign(20, new Val(CNTS.TSIG, TYPE_COUNT));
+    r->Assign(21, new Val(CNTS.EDNS, TYPE_COUNT));
+    r->Assign(22, new Val(CNTS.RD, TYPE_COUNT));
+    r->Assign(23, new Val(CNTS.DO, TYPE_COUNT));
+    r->Assign(24, new Val(CNTS.CD, TYPE_COUNT));
+    r->Assign(25, new Val(CNTS.V4, TYPE_COUNT));
+    r->Assign(26, new Val(CNTS.V6, TYPE_COUNT));
+
+    r->Assign(27, new Val(CNTS.OpQuery, TYPE_COUNT));
+    r->Assign(28, new Val(CNTS.OpIQuery, TYPE_COUNT));
+    r->Assign(29, new Val(CNTS.OpStatus, TYPE_COUNT));
+    r->Assign(30, new Val(CNTS.OpNotify, TYPE_COUNT));
+    r->Assign(31, new Val(CNTS.OpUpdate, TYPE_COUNT));
+    r->Assign(32, new Val(CNTS.OpUnassigned, TYPE_COUNT));
+
+    r->Assign(33, new Val(CNTS.rcode_noerror, TYPE_COUNT));
+    r->Assign(34, new Val(CNTS.rcode_format_err, TYPE_COUNT));
+    r->Assign(35, new Val(CNTS.rcode_server_fail, TYPE_COUNT));
+    r->Assign(36, new Val(CNTS.rcode_nxdomain, TYPE_COUNT));
+    r->Assign(37, new Val(CNTS.rcode_not_impl, TYPE_COUNT));
+    r->Assign(38, new Val(CNTS.rcode_refused, TYPE_COUNT));
+
+    r->Assign(39, new Val(CNTS.logged, TYPE_COUNT));
+
+    uint qlen = CNTS.qlen ? CNTS.qlen / CNTS.request : 0;
+    uint rlen = CNTS.rlen ? CNTS.rlen / (CNTS.reply + CNTS.rejected) : 0;
+
+    r->Assign(40, new Val(qlen, TYPE_COUNT));
+    r->Assign(41, new Val(rlen, TYPE_COUNT));
+
+    r->Assign(42, new Val(CNTS.clients, TYPE_COUNT));
+    r->Assign(43, new Val(CNTS.zones, TYPE_COUNT));
+    r->Assign(44, new Val(CNTS.qlen/1048576.0, TYPE_DOUBLE));
+    r->Assign(45, new Val(CNTS.rlen/1048576.0, TYPE_DOUBLE));
+    r->Assign(46, new Val((CNTS.qlen+CNTS.rlen)/1048576.0, TYPE_DOUBLE));
+
+    vl->append(r);
+    mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
+  }
+  // Clear counters
+  memset(&CNTS, 0, sizeof(CurCounts));
+}
+
+RecordVal*  __dns_telemetry_get_totals(double ts) {
+  RecordVal* r = new RecordVal(dns_telemetry_counts);
+
+  r->Assign(0, new Val(ts, TYPE_DOUBLE));
+  r->Assign(1, new Val(0, TYPE_DOUBLE));
+  r->Assign(2, new Val(TOTALS.request, TYPE_COUNT));
+  r->Assign(3, new Val(TOTALS.rejected, TYPE_COUNT));
+  r->Assign(4, new Val(TOTALS.reply, TYPE_COUNT));
+  r->Assign(5, new Val(TOTALS.non_dns_request, TYPE_COUNT));
+
+  r->Assign(6, new Val(TOTALS.ANY_RD, TYPE_COUNT));
+
+  r->Assign(7, new Val(TOTALS.ANY, TYPE_COUNT));
+  r->Assign(8, new Val(TOTALS.A, TYPE_COUNT));
+  r->Assign(9, new Val(TOTALS.AAAA, TYPE_COUNT));
+  r->Assign(10, new Val(TOTALS.NS, TYPE_COUNT));
+  r->Assign(11, new Val(TOTALS.CNAME, TYPE_COUNT));
+
+  r->Assign(12, new Val(TOTALS.PTR, TYPE_COUNT));
+  r->Assign(13, new Val(TOTALS.SOA, TYPE_COUNT));
+  r->Assign(14, new Val(TOTALS.MX, TYPE_COUNT));
+  r->Assign(15, new Val(TOTALS.TXT, TYPE_COUNT));
+  r->Assign(16, new Val(TOTALS.SRV, TYPE_COUNT));
+  r->Assign(17, new Val(TOTALS.other, TYPE_COUNT));
+
+  r->Assign(18, new Val(TOTALS.TCP, TYPE_COUNT));
+  r->Assign(19, new Val(TOTALS.UDP, TYPE_COUNT));
+  r->Assign(20, new Val(TOTALS.TSIG, TYPE_COUNT));
+  r->Assign(21, new Val(TOTALS.EDNS, TYPE_COUNT));
+  r->Assign(22, new Val(TOTALS.RD, TYPE_COUNT));
+  r->Assign(23, new Val(TOTALS.DO, TYPE_COUNT));
+  r->Assign(24, new Val(TOTALS.CD, TYPE_COUNT));
+  r->Assign(25, new Val(TOTALS.V4, TYPE_COUNT));
+  r->Assign(26, new Val(TOTALS.V6, TYPE_COUNT));
+
+  r->Assign(27, new Val(TOTALS.OpQuery, TYPE_COUNT));
+  r->Assign(28, new Val(TOTALS.OpIQuery, TYPE_COUNT));
+  r->Assign(29, new Val(TOTALS.OpStatus, TYPE_COUNT));
+  r->Assign(30, new Val(TOTALS.OpNotify, TYPE_COUNT));
+  r->Assign(31, new Val(TOTALS.OpUpdate, TYPE_COUNT));
+  r->Assign(32, new Val(TOTALS.OpUnassigned, TYPE_COUNT));
+
+  r->Assign(33, new Val(TOTALS.rcode_noerror, TYPE_COUNT));
+  r->Assign(34, new Val(TOTALS.rcode_format_err, TYPE_COUNT));
+  r->Assign(35, new Val(TOTALS.rcode_server_fail, TYPE_COUNT));
+  r->Assign(36, new Val(TOTALS.rcode_nxdomain, TYPE_COUNT));
+  r->Assign(37, new Val(TOTALS.rcode_not_impl, TYPE_COUNT));
+  r->Assign(38, new Val(TOTALS.rcode_refused, TYPE_COUNT));
+  r->Assign(39, new Val(TOTALS.logged, TYPE_COUNT));
+
+  // THIS ISN'T MEANINGFUL ... Just emitting so that we don't die 
+  uint qlen = CNTS.qlen ? CNTS.qlen / CNTS.request : 0;
+  uint rlen = CNTS.rlen ? CNTS.rlen / (CNTS.reply + CNTS.rejected) : 0;
+
+  r->Assign(40, new Val(qlen, TYPE_COUNT));
+  r->Assign(41, new Val(rlen, TYPE_COUNT));
+
+  r->Assign(42, new Val(TOTALS.clients, TYPE_COUNT));
+  r->Assign(43, new Val(TOTALS.zones, TYPE_COUNT));
+  // NOT MEANINGFUL ... new total time and to keep track of total rlen/qlen
+  r->Assign(44, new Val(TOTALS.qlen/1048576.0, TYPE_DOUBLE));
+  r->Assign(45, new Val(TOTALS.rlen/1048576.0, TYPE_DOUBLE));
+  r->Assign(46, new Val((TOTALS.qlen+TOTALS.rlen)/1048576.0, TYPE_DOUBLE));
+
+  return r;
+}
+
+void __dns_telemetry_fire_totals(double ts) {
+  if ( dns_telemetry_totals ) {
+    val_list* vl = new val_list;
+    vl->append(__dns_telemetry_get_totals(ts));
+    mgr.Dispatch(new Event(dns_telemetry_totals, vl), true);
+  } 
+}
+
+void __dns_telemetry_fire_anyrd(double ts) {
+  if ( dns_telemetry_anyrd_info ) {
+    int len = telemetry_anyrd_counts.Length();
+    if (len > 0) {
+      IterCookie* c = telemetry_anyrd_counts.InitForIteration();
+      HashKey* k;
+      int* val;
+      while ((val = telemetry_anyrd_counts.NextEntry(k, c)))
+	{
+	  char* key =  (char*)k->Key();
+	  int key_size =  k->Size();
+	  // @componentry. NOT SAFE. FIX THIS. 
+	  // Making copy because of use of STRTOK which is destructive.	  
+	  char anyrd_key[600];
+	  strncpy(anyrd_key, key, key_size);
+	  anyrd_key[key_size] = 0;
+	  char seps[] = "|";
+	  char* ip = strtok(anyrd_key, seps );
+	  char* qname = strtok( NULL, seps);
+	  RecordVal* r = new RecordVal(dns_telemetry_anyrd_stats);
+	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
+	  r->Assign(1, new StringVal(ip));
+	  r->Assign(2, new StringVal(qname));
+	  r->Assign(3, new Val(*val, TYPE_COUNT));
+	  val_list* vl = new val_list;
+	  vl->append(r);
+	  mgr.Dispatch(new Event(dns_telemetry_anyrd_info, vl), true);
+	}
+      telemetry_anyrd_counts.Clear();
+    } else {
+      // Always emit an empty record for consistency and to ensure a file exists for the interval
+      RecordVal* r = new RecordVal(dns_telemetry_anyrd_stats);
+      r->Assign(0, new Val(ts, TYPE_DOUBLE));
+      r->Assign(1, new StringVal(""));
+      r->Assign(2, new StringVal(""));
+      r->Assign(3, new Val(0, TYPE_COUNT));
+      val_list* vl = new val_list;
+      vl->append(r);
+      mgr.Dispatch(new Event(dns_telemetry_anyrd_info, vl), true);
+    }
+  }
+}
+
+void __dns_telemetry_fire_clients(double ts) {
+  if ( dns_telemetry_client_info ) {
+    int len = telemetry_client_stats.Length();
+    if (len > 0) {
+      IterCookie* client_c = telemetry_client_stats.InitForIteration();
+      HashKey* client_k;
+      int* client_v;
+      while ((client_v = telemetry_client_stats.NextEntry(client_k, client_c)))
+	{
+	  char* key =  (char*)client_k->Key();
+	  RecordVal* r = new RecordVal(dns_telemetry_client_stats);
+	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
+	  r->Assign(1, new StringVal(key));
+	  r->Assign(2, new Val(*client_v, TYPE_COUNT));
+	  val_list* vl = new val_list;
+	  vl->append(r);
+	  mgr.Dispatch(new Event(dns_telemetry_client_info, vl), true);
+	} 
+      telemetry_client_stats.Clear();
+    }
+    else {
+      // Always emit an empty record for consistency and to ensure a file exists for the interval
+      RecordVal* r = new RecordVal(dns_telemetry_client_stats);
+      r->Assign(0, new Val(ts, TYPE_DOUBLE));
+      r->Assign(1, new StringVal(""));
+      r->Assign(2, new Val(0, TYPE_COUNT));
+      val_list* vl = new val_list;
+      vl->append(r);
+      mgr.Dispatch(new Event(dns_telemetry_client_info, vl), true);
+    }
+  }
+}
+
+FILE* file_rotate(const char* name, const char* to_name)
+{
+  // Build file names.
+  const int buflen = strlen(name) + 128;
+  char tmpname[buflen], newname[buflen+4];
+  safe_snprintf(newname, buflen, "%s", to_name);
+  newname[buflen-1] = '\0';
+  strcpy(tmpname, newname);
+  strcat(tmpname, ".tmp");
+
+  // First open the new file using a temporary name.
+  FILE* newf = fopen(tmpname, "w");
+  if ( ! newf ) {
+    fprintf(stderr, "file_rotate (open): can't open %s: %s\n", tmpname, strerror(errno));
+    return 0;
+  }
+
+  // Then move old file to and make sure it really gets created.
+  struct stat dummy;
+  if ( link(name, newname) < 0 || stat(newname, &dummy) < 0 ) {
+    fprintf(stderr, "file_rotate (move): can't move %s to %s: %s\n", name, newname, strerror(errno));
+    fclose(newf);
+    unlink(newname);
+    unlink(tmpname);
+    return 0;
+  }
+
+  // Close current file, and move the tmp to its place.
+  if ( unlink(name) < 0 || link(tmpname, name) < 0 || unlink(tmpname) < 0 ) {
+    reporter->Error("file_rotate (close): can't move %s to %s: %s\n", tmpname, name, strerror(errno));
+    exit(1);	// hard to fix, but shouldn't happen anyway...
+  }
+
+  fclose(newf);
+  return 0;
+  // return newf;
+}
+
+// #define ROTATE_LOGGING 
+
+void __dns_telemetry_fire_details(double ts, bool terminating) {
+
+  // How we deal with synchronous, manual rotation.
+  // Special case for high-perf writing scenarios (> 200K QPS)
+  static char timestamp[256];
+  static char rotate_fname[256];
+  static char source_fname[256];
+  time_t time = (time_t) ts-59;; // ugly. We're getting called @ the 59'th
+  strftime(timestamp, sizeof(timestamp), "%y-%m-%d_%H.%M.%S", localtime(&time));
+
+  IterCookie* cookie = DETAIL_LOGGER_INFO.InitForIteration();
+  HashKey* key;
+  OwnerStats* info;
+  DetailLogInfo* logger;
+  int i = 0;
+  bool common_rotated = false;
+  PDict(int) owners;
+
+  while ((logger = DETAIL_LOGGER_INFO.NextEntry(key, cookie))) {
+
+    char* root_fname = logger->fname;
+
+    bool enabled = logger->enabled;
+
+    switch  (logger->log_id) 
+      {
+      case 1:
+	{
+	  // Multi Zone
+	  sprintf(source_fname, "%s-O-%08d.log", root_fname, logger->owner_id);
+	  sprintf(rotate_fname, "%s-O-%08d-%s.log", root_fname, logger->owner_id, timestamp);
+	  break;
+	}
+      case 2:
+	{
+	  // Single Zone
+	  sprintf(source_fname, "%s-Z-%08d.log", root_fname, logger->zone_id);
+	  sprintf(rotate_fname, "%s-Z-%08d-%s.log", root_fname, logger->zone_id, timestamp);
+	  break;
+	}
+      case 3:
+	{
+	  // Common
+	  sprintf(source_fname, "%s-00000000.log", root_fname);
+	  sprintf(rotate_fname, "%s-00000000-%s.log", root_fname, timestamp);
+	  break;
+	}
+      }
+
+    // See if we've processed this owner yet. 
+    HashKey* owner_key = new HashKey(source_fname);
+    DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(owner_key);
+    int* rotated_by = owners.Lookup(owner_key);
+
+#ifdef ROTATE_LOGGING
+    fprintf(stderr, "Processing logid=%d owner=%d zone=%d rotated=%p file=%p open_logger=%p\n", logger->log_id, logger->owner_id, logger->zone_id, rotated_by, logger->file, open_logger);
+#endif
+
+    FILE* newf = 0;
+
+    // Rotate
+    if (logger->file != 0) {
+
+      if (rotated_by == NULL) {
+	logger->file->Flush();
+	logger->file->Close();
+	if (strstr(source_fname, logger->file->Name())) {
+#ifdef ROTATE_LOGGING
+	  fprintf(stderr, "  Rotating %s => %s logger=%p\n", source_fname, rotate_fname, logger);
+#endif
+	} else {
+	  strcpy(rotate_fname, logger->file->Name());
+	  strcpy(source_fname, rotate_fname);
+	  char rotate_timestamp[128];
+	  sprintf(rotate_timestamp, "-%s.log", timestamp);
+	  strcpy(strstr(rotate_fname, ".log"), rotate_timestamp);
+#ifdef ROTATE_LOGGING
+	  fprintf(stderr, "  Rotating %s => %s logger=%p\n", source_fname, rotate_fname, logger);
+#endif
+	}
+	newf = file_rotate(source_fname, rotate_fname);
+	
+	if (logger->log_id == 1) {
+	  // Remember the fact that we've already rotated for this Multi-Zone file
+	  owners.Insert(owner_key, new int(logger->zone_id));
+	} else if (logger->log_id == 3) {
+	  // Remember the fact that we've already rotated for the Multi-Customer/Zone (Common) file
+	  common_rotated = true;
+	}
+      } else {
+	if (strstr(source_fname, logger->file->Name())) {
+#ifdef ROTATE_LOGGING
+	  fprintf(stderr, "  Ignoring %s, already rotated via zoneid=%d file=%p %s\n", source_fname, *rotated_by, logger->file, logger->file->Name());
+#endif
+	} else {
+	  strcpy(rotate_fname, logger->file->Name());
+	  char rotate_timestamp[128];
+	  sprintf(rotate_timestamp, "-%s.log", timestamp);
+	  strcpy(strstr(rotate_fname, ".log"), rotate_timestamp);
+#ifdef ROTATE_LOGGING
+	  fprintf(stderr, "  ZZ TODO Rotating %s => %s logger=%p\n", logger->file->Name(), rotate_fname, logger);
+#endif
+	  newf = file_rotate(logger->file->Name(), rotate_fname);
+	}
+	// Previous rotation will have cleaned this dangling pointer up. Ugly. :-(
+	logger->file = 0;
+      }
+
+    } else if (logger->log_id == 3) {
+
+      // No open file. Creating empty Common details. 
+      // TODO: Consider tracking the number of active zones being common logged. If > 1 then create empty.
+      if (!common_rotated) {
+#ifdef ROTATE_LOGGING
+	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
+#endif
+	FILE* f = fopen(rotate_fname, "wb");
+	fclose(f);
+	common_rotated = true;
+#ifdef ROTATE_LOGGING
+      } else {
+	fprintf(stderr, "  Common already rotated\n");
+#endif
+      }
+
+    } else if (logger->log_id == 2) {
+
+      // Single Zone
+#ifdef ROTATE_LOGGING
+      fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
+#endif
+      FILE* f = fopen(rotate_fname, "wb");
+      fclose(f);
+    }
+    else if (logger->log_id == 1) {
+
+      // Multi-Zone -- we may have already rotated. No need to create if that's the case.
+      if (rotated_by != NULL) {
+#ifdef ROTATE_LOGGING
+	fprintf(stderr, "  NOT creating empty details for %s, already rotated/created zoneid=%d\n", rotate_fname, *rotated_by);
+#endif
+      } else {
+#ifdef ROTATE_LOGGING
+	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
+#endif
+	FILE* f = fopen(rotate_fname, "wb");
+	fclose(f);
+	owners.Insert(owner_key, new int(logger->zone_id));
+      }
+
+    }
+      
+    if (!terminating) {
+      if (logger->file != NULL) {
+	delete logger->file;
+	logger->file = NULL;
+	HashKey* open_logger_key = new HashKey(source_fname);
+	DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
+	if (open_logger != NULL) {
+#ifdef ROTATE_LOGGING
+	  fprintf(stderr, "  Removing open logger info %s\n", source_fname);
+#endif
+	  DETAIL_LOGGER_OPEN.Remove(open_logger_key);
+	}
+	delete open_logger_key;
+      }
+	
+      // Only reopen if we're still logging 
+      if (!enabled) {
+	logger->file = NULL;
+#ifdef ROTATE_LOGGING
+	fprintf(stderr, "  Not opening logger file, now not logging for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
+#endif
+	unlink(source_fname);
+      } else {
+	if (logger->log_id == 1 || logger->log_id == 2) {
+	  // TODO What if we can't open the file? Permissions, etc...
+	  FILE* f = fopen(source_fname, "wb");
+	  logger->file = new BroFile(f, source_fname, "wb");
+#ifdef ROTATE_LOGGING
+	  fprintf(stderr, "  Opening new logger source=%s file=%p\n", source_fname, logger->file);
+#endif
+	}
+      }
+    } else {
+      unlink(source_fname);
+    }
+
+    delete owner_key;
+  }
+  owners.Clear();
+}
+
+void __dns_telemetry_fire_owners(double ts) {
+  if (dns_telemetry_owner_info) {
+    
+    int len = OWNER_INFO.Length();
+    if (len > 0) {
+
+      IterCookie* cookie = OWNER_INFO.InitForIteration();
+      HashKey* key;
+      OwnerStats* info;
+      while ((info = OWNER_INFO.NextEntry(key, cookie))) {
+	RecordVal* r = new RecordVal(dns_telemetry_owner_stats);
+	r->Assign(0, new Val(ts, TYPE_DOUBLE));
+	r->Assign(1, new Val(info->id, TYPE_COUNT));
+	r->Assign(2, new Val(info->cnt, TYPE_COUNT));
+	val_list* vl = new val_list;
+	vl->append(r);
+	mgr.Dispatch(new Event(dns_telemetry_owner_info, vl), true);
+      }
+      OWNER_INFO.Clear();
+
+    } else {
+      // Always emit an empty record for consistency and to ensure a file exists for the interval
+      RecordVal* r = new RecordVal(dns_telemetry_owner_stats);
+      r->Assign(0, new Val(ts, TYPE_DOUBLE));
+      r->Assign(1, new Val(0, TYPE_COUNT));
+      r->Assign(2, new Val(0, TYPE_COUNT));
+      val_list* vl = new val_list;
+      vl->append(r);
+      mgr.Dispatch(new Event(dns_telemetry_owner_info, vl), true);
+    }
+  }
+}
+
+void __dns_telemetry_fire_zones(double ts) {
+
+  if ( dns_telemetry_zone_info ) {
+
+    int len = telemetry_zone_stats.Length();
+    if (len > 0) {
+      IterCookie* zone_cookie = telemetry_zone_stats.InitForIteration();
+      HashKey* zone_k;
+      ZoneStats* zv;
+      int cnt = 0;
+      while ((zv = telemetry_zone_stats.NextEntry(zone_k, zone_cookie)))
+	{
+	  // Do we need to free each entry (not key) as we iterate?
+	  RecordVal* r = new RecordVal(dns_telemetry_zone_stats);
+	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
+	  r->Assign(1, new StringVal(zv->key));
+	  r->Assign(2, new Val(zv->zone_id, TYPE_COUNT));
+	  r->Assign(3, new Val(zv->owner_id, TYPE_COUNT));
+	  r->Assign(4, new Val(zv->cnt, TYPE_COUNT));
+	  r->Assign(5, new Val(zv->A, TYPE_COUNT));
+	  r->Assign(6, new Val(zv->AAAA, TYPE_COUNT));
+	  r->Assign(7, new Val(zv->CNAME, TYPE_COUNT));
+	  r->Assign(8, new Val(zv->NS, TYPE_COUNT));
+	  r->Assign(9, new Val(zv->SOA, TYPE_COUNT));
+	  r->Assign(10, new Val(zv->SRV, TYPE_COUNT));
+	  r->Assign(11, new Val(zv->TXT, TYPE_COUNT));
+	  r->Assign(12, new Val(zv->MX, TYPE_COUNT));
+	  r->Assign(13, new Val(zv->DO, TYPE_COUNT));
+	  r->Assign(14, new Val(zv->RD, TYPE_COUNT));
+	  r->Assign(15, new Val(zv->other, TYPE_COUNT));
+	  r->Assign(16, new Val(zv->NOERROR, TYPE_COUNT));
+	  r->Assign(17, new Val(zv->REFUSED, TYPE_COUNT));
+	  r->Assign(18, new Val(zv->NXDOMAIN, TYPE_COUNT));
+	  val_list* vl = new val_list;
+	  vl->append(r);
+	  mgr.Dispatch(new Event(dns_telemetry_zone_info, vl), true);
+	}
+      telemetry_zone_stats.Clear();
+    } else {
+      // Always emit an empty record for consistency and to ensure a file exists for the interval
+      RecordVal* r = new RecordVal(dns_telemetry_zone_stats);
+      r->Assign(0, new Val(ts, TYPE_DOUBLE));
+      r->Assign(1, new StringVal(""));
+      r->Assign(2, new Val(0, TYPE_COUNT));
+      r->Assign(3, new Val(0, TYPE_COUNT));
+      r->Assign(4, new Val(0, TYPE_COUNT));
+      r->Assign(5, new Val(0, TYPE_COUNT));
+      r->Assign(6, new Val(0, TYPE_COUNT));
+      r->Assign(7, new Val(0, TYPE_COUNT));
+      r->Assign(8, new Val(0, TYPE_COUNT));
+      r->Assign(9, new Val(0, TYPE_COUNT));
+      r->Assign(10, new Val(0, TYPE_COUNT));
+      r->Assign(11, new Val(0, TYPE_COUNT));
+      r->Assign(12, new Val(0, TYPE_COUNT));
+      r->Assign(13, new Val(0, TYPE_COUNT));
+      r->Assign(14, new Val(0, TYPE_COUNT));
+      r->Assign(15, new Val(0, TYPE_COUNT));
+      r->Assign(16, new Val(0, TYPE_COUNT));
+      r->Assign(17, new Val(0, TYPE_COUNT));
+      r->Assign(18, new Val(0, TYPE_COUNT));
+      val_list* vl = new val_list;
+      vl->append(r);
+      mgr.Dispatch(new Event(dns_telemetry_zone_info, vl), true);
+    }
+
+  }
+}
+
+void __dns_telemetry_fire_qnames(double ts) {
+  if ( dns_telemetry_qname_info ) {
+    int len = 0;
+    len = telemetry_qname_stats.Length();
+    if (len > 0) {
+      IterCookie* qname_cookie = telemetry_qname_stats.InitForIteration();
+      HashKey* qname_k;
+      QnameStats* qname_v;
+      while ((qname_v = telemetry_qname_stats.NextEntry(qname_k, qname_cookie)))
+	{
+	  char* key =  (char*)qname_k->Key();
+	  RecordVal* r = new RecordVal(dns_telemetry_qname_stats);
+	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
+	  r->Assign(1, new StringVal(key));
+	  r->Assign(2, new Val(qname_v->zone_id, TYPE_COUNT));
+	  r->Assign(3, new Val(qname_v->owner_id, TYPE_COUNT));
+	  r->Assign(4, new Val(qname_v->cnt, TYPE_COUNT));
+	  r->Assign(5, new Val(qname_v->A, TYPE_COUNT));
+	  r->Assign(6, new Val(qname_v->AAAA, TYPE_COUNT));
+	  r->Assign(7, new Val(qname_v->CNAME, TYPE_COUNT));
+	  r->Assign(8, new Val(qname_v->MX, TYPE_COUNT));
+	  r->Assign(9, new Val(qname_v->SOA, TYPE_COUNT));
+	  r->Assign(10, new Val(qname_v->TXT, TYPE_COUNT));
+	  r->Assign(11, new Val(qname_v->SRV, TYPE_COUNT));
+	  r->Assign(12, new Val(qname_v->NS, TYPE_COUNT));
+	  r->Assign(13, new Val(qname_v->other, TYPE_COUNT));
+	  val_list* vl = new val_list;
+	  vl->append(r);
+	  mgr.Dispatch(new Event(dns_telemetry_qname_info, vl), true);
+	}
+      telemetry_qname_stats.Clear();
+    } 
+
+    if (len == 0) {
+      RecordVal* r = new RecordVal(dns_telemetry_qname_stats);
+      r->Assign(0, new Val(ts, TYPE_DOUBLE));
+      r->Assign(1, new StringVal(""));
+      r->Assign(2, new Val(0, TYPE_COUNT));
+      r->Assign(3, new Val(0, TYPE_COUNT));
+      r->Assign(4, new Val(0, TYPE_COUNT));
+      r->Assign(5, new Val(0, TYPE_COUNT));
+      r->Assign(6, new Val(0, TYPE_COUNT));
+      r->Assign(7, new Val(0, TYPE_COUNT));
+      r->Assign(8, new Val(0, TYPE_COUNT));
+      r->Assign(9, new Val(0, TYPE_COUNT));
+      r->Assign(10, new Val(0, TYPE_COUNT));
+      r->Assign(11, new Val(0, TYPE_COUNT));
+      r->Assign(12, new Val(0, TYPE_COUNT));
+      r->Assign(13, new Val(0, TYPE_COUNT));
+      val_list* vl = new val_list;
+      vl->append(r);
+      mgr.Dispatch(new Event(dns_telemetry_qname_info, vl), true);
+    }
+  }
+}
+

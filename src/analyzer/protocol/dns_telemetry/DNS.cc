@@ -3,7 +3,6 @@
 // TODOs
 //
 // 1) Implement per zone QNAME reporting. The current implementation will enable for ALL qnames. This is way to expensive.
-// 2) Implement per zone COUNT telemetry. The current implementation is global (aggregate) counts used for operational purposes.
 //
 //    A possible solution to this is to stop all use of the BRO logging framework and leverage the capability do high-volume
 //    details logging.
@@ -89,6 +88,7 @@ struct ZoneInfo {
   int owner_id;
   int log_id;
   int stat_id;
+  int qname_id;
   bool details;
 };
 
@@ -255,6 +255,16 @@ struct StatsLogInfo {
 };
 declare(PDict,StatsLogInfo);
 PDict(StatsLogInfo) STATS_LOGGER_INFO;
+
+// Allow per zone stats qname stats. Per Zone for Filter
+struct QnameFilter {
+  int owner_id;
+  int zone_id;
+  bool enabled;
+};
+declare(PDict,QnameFilter);
+PDict(QnameFilter) QNAME_FILTERS;
+
 
 CurCounts CNTS;
 CurCounts TOTALS;
@@ -602,22 +612,32 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   }
 
   QnameStats* qname_stat = 0;
+  bool local_do_qname_stats = do_qname_stats;
+
   if (is_query && do_qname_stats && dns_telemetry_qname_info) {
-    char qname_key[256];
-    sprintf(qname_key, "%s", name);
-    HashKey* qname_hash = new HashKey(qname_key);
-    qname_stat = telemetry_qname_stats.Lookup(qname_hash);
-    if (!qname_stat) {
-      qname_stat = new QnameStats();
-      qname_stat->cnt = 0;
-      telemetry_qname_stats.Insert(qname_hash, qname_stat);
-    } else {
-      ++qname_stat->cnt;
-    }
-    delete qname_hash;
     if (zinfo) {
-      qname_stat->zone_id = zinfo->zone_id;
-      qname_stat->owner_id = zinfo->owner_id;
+      HashKey* filter_key = new HashKey((bro_int_t)zinfo->zone_id);
+      QnameFilter* filter = QNAME_FILTERS.Lookup(filter_key);
+      if (filter && filter->enabled) {
+	char qname_key[256];
+	sprintf(qname_key, "%s", name);
+	HashKey* qname_hash = new HashKey(qname_key);
+	qname_stat = telemetry_qname_stats.Lookup(qname_hash);
+	if (!qname_stat) {
+	  qname_stat = new QnameStats();
+	  qname_stat->cnt = 0;
+	  telemetry_qname_stats.Insert(qname_hash, qname_stat);
+	} else {
+	  ++qname_stat->cnt;
+	}
+	delete qname_hash;
+	qname_stat->zone_id = zinfo->zone_id;
+	qname_stat->owner_id = zinfo->owner_id;
+      }
+      delete filter_key;
+      local_do_qname_stats = qname_stat != NULL;
+    } else {
+      fprintf(stderr, "ERROR: No zinfo!\n");
     }
   }
 
@@ -666,7 +686,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.A;
 	  if (custom_stats) 
 	    ++custom_stats->A;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->A;
 	  if (do_zone_stats)
 	    ++zv->A;
@@ -676,7 +696,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.NS;
 	  if (custom_stats) 
 	    ++custom_stats->NS;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->NS;
 	  if (do_zone_stats)
 	    ++zv->NS;
@@ -686,7 +706,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.CNAME;
 	  if (custom_stats) 
 	    ++custom_stats->CNAME;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->CNAME;
 	  if (do_zone_stats)
 	    ++zv->CNAME;
@@ -696,7 +716,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.SOA;
 	  if (custom_stats) 
 	    ++custom_stats->SOA;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->SOA;
 	  if (do_zone_stats)
 	    ++zv->SOA;
@@ -706,7 +726,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.PTR;
 	  if (custom_stats) 
 	    ++custom_stats->PTR;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->PTR;
 	  if (do_zone_stats)
 	    ++zv->PTR;
@@ -716,7 +736,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.MX;
 	  if (custom_stats) 
 	    ++custom_stats->MX;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->MX;
 	  if (do_zone_stats)
 	    ++zv->MX;
@@ -726,7 +746,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.TXT;
 	  if (custom_stats) 
 	    ++custom_stats->TXT;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->TXT;
 	  if (do_zone_stats)
 	    ++zv->TXT;
@@ -736,7 +756,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.AAAA;
 	  if (custom_stats) 
 	    ++custom_stats->AAAA;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->AAAA;
 	  if (do_zone_stats)
 	    ++zv->AAAA;
@@ -746,7 +766,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.SRV;
 	  if (custom_stats) 
 	    ++custom_stats->SRV;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->SRV;
 	  if (do_zone_stats)
 	    ++zv->SRV;
@@ -756,7 +776,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.ANY;
 	  if (custom_stats) 
 	    ++custom_stats->ANY;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->other;
 	  if (do_zone_stats)
 	    ++zv->other;
@@ -787,7 +807,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.other;
 	  if (custom_stats) 
 	    ++custom_stats->other;
-	  if (do_qname_stats)
+	  if (local_do_qname_stats)
 	    ++qname_stat->other;
 	  if (do_zone_stats)
 	    ++zv->other;
@@ -1994,7 +2014,7 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
 	add++;
       } else {
 	zinfo = got->second;
-	if (zinfo->zone_id == zone_id && zinfo->log_id == log_id) {
+	if (zinfo->zone_id == zone_id && zinfo->log_id == log_id && zinfo->stat_id == stat_id && zinfo->qname_id == qname_id) {
 	  continue;
 	}
 	change++;
@@ -2009,7 +2029,7 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
       delete zone_hash;
 #endif
 
-      if (log_id != 0) {
+      if (log_id != 0 || qname_id != 0 || stat_id != 0) {
 	fprintf(stderr, "%f zone_info %s\tzid=%d\toid=%d\tlid=%d\tsid=%d\tqid=%d\n", current_time(), name, zone_id, owner_id, log_id, stat_id, qname_id);
       }
 
@@ -2018,6 +2038,7 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
       zinfo->owner_id = owner_id;
       zinfo->log_id = log_id;
       zinfo->stat_id = stat_id;
+      zinfo->qname_id = qname_id;
       zinfo->details = log_id != 0;
 
       HashKey* stat_logger_key = new HashKey((bro_int_t)owner_id);
@@ -2032,6 +2053,21 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
 	stat_logger->enabled = true;
       }
       delete stat_logger_key;
+
+      HashKey* filter_key = new HashKey((bro_int_t)zone_id);
+      QnameFilter* filter =QNAME_FILTERS.Lookup(filter_key);
+      if (filter) {
+	filter->enabled = qname_id != 0;
+	fprintf(stderr, "Existing qname filter owner_id=%d zone_id=%d qname_id=%d\n", owner_id, zone_id, qname_id);
+      } else if (qname_id != 0) {
+	fprintf(stderr, "Adding qname filter owner_id=%d zone_id=%d qname_id=%d\n", owner_id, zone_id, qname_id);
+	filter = new QnameFilter();
+	filter->owner_id = owner_id;
+	filter->zone_id = zone_id;
+	filter->enabled = true;
+	QNAME_FILTERS.Insert(filter_key, filter);
+      }
+      delete filter_key;
 
       DetailLogInfo* logger = NULL;
       HashKey* logger_key = new HashKey((bro_int_t)zinfo->zone_id);

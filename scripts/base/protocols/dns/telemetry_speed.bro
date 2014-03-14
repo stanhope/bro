@@ -65,7 +65,6 @@ global path_log_pcaps = "/var/log/dyn/pcaps/trace";
 global path_config_dbind = "/etc/dbind/bro_dns_telemetry.cfg";
 global path_config_zones = "/etc/dbind/bro_zones.cfg";
 
-# Added a few hard-coded custom count loggers. Need to make these dynamic and associate to specified owner id
 redef enum Log::ID += { ZONES, OWNERS, QNAMES, COUNTS, ANYRD, CLIENTS, COUNTS_CUSTOM_1, COUNTS_CUSTOM_2, COUNTS_CUSTOM_3 };
 
 function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
@@ -203,7 +202,7 @@ event dns_telemetry_count(info:dns_telemetry_counts) {
 	header_emit = T;
     }
     if (info$owner == 0) {
-      print fmt("%f %s %f - %d,%d,%d,%d,%d,%d,%05.2f,%05.2f,%05.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$owner, info$request,info$reply,info$rejected,info$non_dns_request,info$logged,info$MBin,info$MBout,info$MBsec);
+      print fmt("%f %s %f - %d,%d,%d,%d,%d,%05.2f,%05.2f,%05.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$non_dns_request,info$logged,info$MBin,info$MBout,info$MBsec);
       Log::write_at(info$ts, DBIND9::COUNTS, info);
     } else if (info$owner == 1) {
 #       print fmt("custom_stat %s", info);

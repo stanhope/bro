@@ -637,7 +637,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       delete filter_key;
       local_do_qname_stats = qname_stat != NULL;
     } else {
-      fprintf(stderr, "ERROR: No zinfo!\n");
+      // fprintf(stderr, "ERROR: No zinfo! name=%s tlz=%s\n", name, tlz);
+      local_do_qname_stats = false;
     }
   }
 
@@ -855,7 +856,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
       // Determine which logger we should use
       DetailLogInfo* logger = 0;
-      if (zinfo->log_id != 0) {
+      if (zinfo != 0 && zinfo->log_id != 0) {
 
 	HashKey* log_key = new HashKey((bro_int_t)zinfo->zone_id);
 	logger = DETAIL_LOGGER_INFO.Lookup(log_key);

@@ -28,6 +28,12 @@
 #include <unordered_map>
 #include "hash_func.h"
 
+#include <algorithm>
+#include <vector>
+#include <sparsehash/type_traits.h>
+#include <sparsehash/dense_hash_map>
+#include <sparsehash/sparse_hash_map>
+
 using namespace analyzer::dns_telemetry;
 
 struct CurCounts {
@@ -152,10 +158,16 @@ PDict(ZoneStats) telemetry_zone_stats;
 PDict(ZoneInfo) telemetry_zone_info;
 
 #define UNORDERED_MAP
-unordered_map<string, ZoneInfo*> zone_info;
+
+unordered_map<string, ZoneInfo*> *zone_info;
+unordered_map<string,ZoneInfo*>::const_iterator got;
+
+// GOOGLE_NAMESPACE::dense_hash_map<string, ZoneInfo*> *zone_info;
+// GOOGLE_NAMESPACE::dense_hash_map<string,ZoneInfo*>::const_iterator got;
+
 // unordered_map<string, ZoneInfo*, SuperFastHashChar, StringKeyEq> zone_info;
 // unordered_map<string, ZoneInfo*, JesteressHashChar, StringKeyEq> zone_info;
-// unordered_map<string, ZoneInfo*, MurmorChar, StringKeyEq> zone_info;
+unordered_map<string, ZoneInfo*, MurmorChar, StringKeyEq> zone_info_murmor;
 
 struct ZoneMapInfo {
   char fname[512];
@@ -225,6 +237,8 @@ bool do_qname_stats = true;
 bool do_anyrd_stats = true;
 bool do_client_stats = true;
 bool do_details = true;
+bool do_samples = false;
+uint sample_rate = 1;
 
 struct DetailLogInfo {
   double ts;
@@ -464,16 +478,14 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   ZoneInfo* zinfo = 0;
   OwnerStats* owner_stats = 0;
   bool do_zone_details = false;
-
   CurCounts* custom_stats= 0;
-
   bro_int_t owner_id = 0;
 
   if (do_zone_stats && dns_telemetry_zone_info) {
 
 #ifdef UNORDERED_MAP
-    unordered_map<string,ZoneInfo*>::const_iterator got = zone_info.find(tlz);
-    zinfo = got == zone_info.end() ? NULL : got->second;
+    got = zone_info->find(tlz);
+    zinfo = got == zone_info->end() ? NULL : got->second;
 #else
     zinfo = telemetry_zone_info.Lookup(zone_hash);
 #endif
@@ -650,6 +662,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       ++CNTS.request;
       ++TOTALS.request;
     }
+
     if (do_zone_stats) {
       ++zv->cnt;
       if (msg->RD) {
@@ -1125,8 +1138,8 @@ u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
       do
 	{
 #ifdef UNORDERED_MAP
-	  unordered_map<string,ZoneInfo*>::const_iterator got = zone_info.find(pSearch);
-	  ZoneInfo* zinfo = got == zone_info.end() ? NULL : got->second;
+	  got = zone_info->find(pSearch);
+	  ZoneInfo* zinfo = got == zone_info->end() ? NULL : got->second;
 #else
 	  HashKey *key = new HashKey(pSearch);
 	  ZoneInfo* zinfo = telemetry_zone_info.Lookup(key);
@@ -1959,12 +1972,16 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
   struct stat buf;
   stat(fname, &buf);
   int size = buf.st_size;
-  int estimated_cnt = size / 45;
+  int estimated_cnt = size / 43;
   strcpy(ZONE_MAP_INFO.fname, fname);
   ZONE_MAP_INFO.last_mod = buf.st_mtime;
   static char timestr[256];
   strftime(timestr, sizeof(timestr), "%Y%m%dT%H%M%S", localtime(&ZONE_MAP_INFO.last_mod));
   fprintf(stderr, "%f set_zones.start %s size=%d cnt=%d (estimate) lastmod=%s\n", start, fname, size, estimated_cnt, timestr);
+
+  zone_info = new unordered_map<string, ZoneInfo*>(estimated_cnt);
+  // zone_info = new GOOGLE_NAMESPACE::dense_hash_map<string, ZoneInfo*>(estimated_cnt);
+  // zone_info->set_empty_key(string());
 
   FILE* f = fopen(fname, "rt");
 
@@ -2008,10 +2025,10 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
 
       ZoneInfo* zinfo;
 #ifdef UNORDERED_MAP
-      unordered_map<string,ZoneInfo*>::const_iterator got = zone_info.find(name);
-      if (got == zone_info.end()) {
+      got = zone_info->find(name);
+      if (got == zone_info->end()) {
 	zinfo = new ZoneInfo();
-	zone_info.insert({name, zinfo});
+	zone_info->insert({name, zinfo});
 	add++;
       } else {
 	zinfo = got->second;
@@ -2119,9 +2136,10 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
     fclose(f);
     double diff = current_time() - start;
     double rate = cnt / diff;
-    size_t map_size = zone_info.size();
-    uint ignored = cnt - map_size;
 #ifdef UNORDERED_MAP
+    // size_t map_size = zone_info.size();
+    size_t map_size = zone_info->size();
+    uint ignored = cnt - map_size;
     fprintf(stderr, "%f set_zones.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
 #else
     int map_size = telementry_zone_info.Length();

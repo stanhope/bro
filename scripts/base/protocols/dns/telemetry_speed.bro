@@ -198,11 +198,11 @@ global header_emit:bool = F;
 event dns_telemetry_count(info:dns_telemetry_counts) {
     if (!header_emit) {
 	print "";
-	print "ts network_time lag - owner,request,reply,rejected,non_dns_request,logged,clients,zones,A,AAAA,CNAME,SOA,SRV,TXT,MX,qlen,rlen,MBsec,MBin,MBout,MBsec";
+	print "ts network_time lag - owner,request,reply,rejected,logged,MBsec,MBin,MBout,MBsec";
 	header_emit = T;
     }
     if (info$owner == 0) {
-      print fmt("%f %s %f - %d,%d,%d,%d,%d,%05.2f,%05.2f,%05.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$non_dns_request,info$logged,info$MBin,info$MBout,info$MBsec);
+      print fmt("%f %s %f - %d,%d,%d,%d,%05.2f,%05.2f,%05.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$logged,info$MBin,info$MBout,info$MBsec);
       Log::write_at(info$ts, DBIND9::COUNTS, info);
     } else if (info$owner == 1) {
 #       print fmt("custom_stat %s", info);

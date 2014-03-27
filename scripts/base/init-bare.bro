@@ -3232,7 +3232,7 @@ type dns_telemetry_counts: record {
  MBin: double &log;
  MBout: double &log;
  MBsec: double &log;
-
+ rate: double &log;
 };
 
 type dns_telemetry_anyrd_stats: record {

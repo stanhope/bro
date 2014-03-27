@@ -129,7 +129,6 @@ event config_change(description: Input::TableDescription, tpe: Input::Event, lef
         local cur_trace_file = pkt_dumper_file();
 	if (!do_pcaps) {
 	    if (cur_trace_file != "") {
-		print "Closed existing packet dumper. Decide if we should rotate as well.";
 		pkt_dumper_close(path_log_pcaps);
 	    }
 	} else {
@@ -146,23 +145,32 @@ function CreateLogStream(id: Log::ID, config: Log::Stream, path:string) {
   Log::add_filter(id, [$name=path, $path=path, $config=table(["tsv"] = "T",["escape"] = "F")]);
 }
 
+global first_time_init:bool = T;
+
 event Input::end_of_data(name: string, source: string)
 {
-    print fmt("%f config loaded", current_time());
+    print fmt("%f config loaded details=%d zones=%d owners=%d anyrd=%d clients=%d counts=%d", current_time(), do_details, do_zones, do_owners, do_anyrd, do_clients, do_counts);
     dns_telemetry_set_do_details(do_details);
-    dns_telemetry_set_do_zones(do_zones, path_config_zones, path_log_details);
+    dns_telemetry_set_do_zones(do_zones);
+    if (first_time_init) {
+        dns_telemetry_load_anchor_map(path_config_zones, path_log_details);
+    }
     dns_telemetry_set_do_owners(do_owners);
     dns_telemetry_set_do_anyrd(do_anyrd);
     dns_telemetry_set_do_qnames(do_qnames);
     dns_telemetry_set_do_clients(do_clients);
     dns_telemetry_set_do_counts(do_counts);
     dns_telemetry_set_do_totals(T);
+    dns_telemetry_set_sample_rate(1);
     
     if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts)
         local delta:double = init_manual_rotate(current_time());
     local now:double = time_to_double(current_time());
-    print fmt("%f init.complete reading_live=%d pcaps=%d", now, reading_live_traffic(), do_pcaps);
-    Analyzer::register_for_ports(Analyzer::ANALYZER_DNS_TELEMETRY, dns_ports);
+    if (first_time_init) {
+        first_time_init = F;
+        print fmt("%f init.complete reading_live=%d pcaps=%d", now, reading_live_traffic(), do_pcaps);
+    	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS_TELEMETRY, dns_ports);
+    }
 }
 
 event bro_init()
@@ -198,11 +206,11 @@ global header_emit:bool = F;
 event dns_telemetry_count(info:dns_telemetry_counts) {
     if (!header_emit) {
 	print "";
-	print "ts network_time lag - owner,request,reply,rejected,logged,MBsec,MBin,MBout,MBsec";
+	print "ts network_time lag - request,reply,rejected,logged,MBsec,MBin,MBout,MBsec";
 	header_emit = T;
     }
     if (info$owner == 0) {
-      print fmt("%f %s %f - %d,%d,%d,%d,%05.2f,%05.2f,%05.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$logged,info$MBin,info$MBout,info$MBsec);
+      print fmt("%f %s %f - %d,%d,%d,%d,%05.2f,%05.2f,%05.2f,%0.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$logged,info$MBin,info$MBout,info$MBsec,info$rate);
       Log::write_at(info$ts, DBIND9::COUNTS, info);
     } else if (info$owner == 1) {
 #       print fmt("custom_stat %s", info);

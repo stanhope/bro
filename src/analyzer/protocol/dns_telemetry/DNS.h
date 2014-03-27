@@ -177,7 +177,7 @@ protected:
 
 	u_char* ExtractName(const u_char*& data, int& len,
 				u_char* label, int label_len,
-			    const u_char* msg_start, char* tlz);
+			    const u_char* msg_start, char* tlz, void** pzinfo);
 	int ExtractLabel(const u_char*& data, int& len,
 			 u_char*& label, int& label_len,
 			 const u_char* msg_start);

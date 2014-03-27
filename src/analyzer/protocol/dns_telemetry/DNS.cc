@@ -88,7 +88,7 @@ struct AnyRDCounts {
   int cnt;
 };
 
-struct ZoneInfo {
+struct AnchorPoint {
   char key[128];
   int zone_id;
   int owner_id;
@@ -149,50 +149,106 @@ struct QnameStats {
 declare(PDict,int);
 declare(PDict,QnameStats);
 declare(PDict,ZoneStats);
-declare(PDict,ZoneInfo);
+declare(PDict,AnchorPoint);
 
 PDict(int) telemetry_anyrd_counts;
 PDict(int) telemetry_client_stats;
 PDict(QnameStats) telemetry_qname_stats;
 PDict(ZoneStats) telemetry_zone_stats;
-PDict(ZoneInfo) telemetry_zone_info;
+PDict(AnchorPoint) telemetry_anchor_map;
 
-#define UNORDERED_MAP
+// #define UNORDERED_MAP 1
+// #define MURMOR_MAP 1
+// #define SUPERFAST_MAP 1
+// #define DENSE_HASH_MAP 1
+// #define SPARSE_HASH_MAP 1
+// #define FAST_HASH 1
+#define BRO_DICT 1
 
-unordered_map<string, ZoneInfo*> *zone_info;
-unordered_map<string,ZoneInfo*>::const_iterator got;
+#define DEBUG_SAMPLING
 
-// GOOGLE_NAMESPACE::dense_hash_map<string, ZoneInfo*> *zone_info;
-// GOOGLE_NAMESPACE::dense_hash_map<string,ZoneInfo*>::const_iterator got;
+#ifdef FAST_HASH
+#define FAST_HASH_KEYLEN 64
+#include <fasthash/fast_hash.h>
+#include <fasthash/fast_hash.c>
+fast_hash* anchor_map;
+#endif
 
-// unordered_map<string, ZoneInfo*, SuperFastHashChar, StringKeyEq> zone_info;
-// unordered_map<string, ZoneInfo*, JesteressHashChar, StringKeyEq> zone_info;
-unordered_map<string, ZoneInfo*, MurmorChar, StringKeyEq> zone_info_murmor;
+#ifdef UNORDERED_MAP
+unordered_map<string, AnchorPoint*> *anchor_map;
+unordered_map<string, AnchorPoint*>::const_iterator got;
+// unordered_map<string, AnchorPoint*, JesteressHashChar, StringKeyEq> zone_info;
+#endif
 
-struct ZoneMapInfo {
-  char fname[512];
-  time_t last_mod;
+#ifdef MURMOR_MAP
+unordered_map<string, AnchorPoint*, MurmorChar, StringKeyEq> *anchor_map;
+unordered_map<string, AnchorPoint*, MurmorChar, StringKeyEq>::const_iterator got;
+#endif
+
+#ifdef SUPERFAST_MAP
+unordered_map<string, AnchorPoint*, SuperFastHashChar, StringKeyEq> *anchor_map;
+unordered_map<string, AnchorPoint*>::const_iterator got;
+#endif
+
+#ifdef DENSE_HASH_MAP
+GOOGLE_NAMESPACE::dense_hash_map<string, AnchorPoint*> *anchor_map;
+GOOGLE_NAMESPACE::dense_hash_map<string,AnchorPoint*>::const_iterator got;
+#endif
+
+#ifdef SPARSE_HASH_MAP
+GOOGLE_NAMESPACE::sparse_hash_map<string, AnchorPoint*> *anchor_map;
+GOOGLE_NAMESPACE::sparse_hash_map<string,AnchorPoint*>::const_iterator got;
+#endif
+
+// ----------------------------------------------------
+// ----------------------------------------------------
+
+class AsyncWriter : public threading::MsgThread {
+public:
+  AsyncWriter();
+  virtual ~AsyncWriter();
+  virtual bool OnHeartbeat(double network_time, double current_time);
+  virtual bool OnFinish(double network_time);
+protected:
 };
 
-ZoneMapInfo ZONE_MAP_INFO;
+AsyncWriter::AsyncWriter() {
+  SetName("AsyncWriter");
+}
 
-class ZoneUpdater : public threading::MsgThread {
+AsyncWriter::~AsyncWriter() {
+}
+
+bool AsyncWriter::OnHeartbeat(double network_time, double current_time) {
+  // COuld be used to flush @ a predictable heartbeat pace (~ once per second)
+  return 1;
+}
+
+bool AsyncWriter::OnFinish(double network_time) {
+  fprintf(stderr, "AsyncWriter FINISH\n");
+  return 1;
+}
+
+// ----------------------------------------------------
+// ----------------------------------------------------
+
+class AnchorMapUpdater : public threading::MsgThread {
 public:
-  ZoneUpdater(char* _fname, double _interval = 60);
-  virtual ~ZoneUpdater();
+  AnchorMapUpdater(char* _fname, double _interval = 60);
+  virtual ~AnchorMapUpdater();
   virtual bool OnHeartbeat(double network_time, double current_time);
   virtual bool OnFinish(double network_time);
 protected:
   double interval;
   double next;
   time_t last;
-  char* fname;
+  char fname[512];
 };
 
-ZoneUpdater::ZoneUpdater(char* _fname, double _interval) {
+AnchorMapUpdater::AnchorMapUpdater(char* _fname, double _interval) {
   SetName("ZoneUpdater");
   interval = _interval;
-  fname = _fname;
+  strcpy(fname, _fname);
   next = current_time() + interval;
   struct stat buf;
   stat(fname, &buf);
@@ -200,34 +256,35 @@ ZoneUpdater::ZoneUpdater(char* _fname, double _interval) {
   last = buf.st_mtime;
 }
 
-ZoneUpdater::~ZoneUpdater() {
+AnchorMapUpdater::~AnchorMapUpdater() {
 }
 
-int __dns_telemetry_set_zones(const char* fname, const char* details_fname);
+int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname);
 
-bool ZoneUpdater::OnHeartbeat(double network_time, double current_time) {
+bool AnchorMapUpdater::OnHeartbeat(double network_time, double current_time) {
   if (current_time > next) {
     // See if the zonemap has changed
     struct stat buf;
-    stat(ZONE_MAP_INFO.fname, &buf);
-    if (buf.st_mtime != ZONE_MAP_INFO.last_mod) {
+    stat(fname, &buf);
+    if (buf.st_mtime != last) {
       static char old_timestr[256];
-      strftime(old_timestr, sizeof(old_timestr), "%Y%m%dT%H%M%S", localtime(&ZONE_MAP_INFO.last_mod));
+      strftime(old_timestr, sizeof(old_timestr), "%Y%m%dT%H%M%S", localtime(&last));
       static char new_timestr[256];
       strftime(new_timestr, sizeof(new_timestr), "%Y%m%dT%H%M%S", localtime(&buf.st_mtime));
       fprintf(stderr,"%f zonemap change detected old=%s new=%s\n", current_time, old_timestr, new_timestr);
-      __dns_telemetry_set_zones(ZONE_MAP_INFO.fname, NULL);
+      last = buf.st_mtime;
+      __dns_telemetry_load_anchor_map(fname, NULL);
     }
     next += interval;
   }
   return 1;
 }
 
-bool ZoneUpdater::OnFinish(double network_time) {
+bool AnchorMapUpdater::OnFinish(double network_time) {
   return 1;
 }
 
-ZoneUpdater* ZONE_UPDATER = NULL;
+AnchorMapUpdater* ANCHOR_MAP_UPDATER = NULL;
 
 bool do_counts = false;
 bool do_totals = false;
@@ -237,7 +294,6 @@ bool do_qname_stats = true;
 bool do_anyrd_stats = true;
 bool do_client_stats = true;
 bool do_details = true;
-bool do_samples = false;
 uint sample_rate = 1;
 
 struct DetailLogInfo {
@@ -245,7 +301,6 @@ struct DetailLogInfo {
   int owner_id;
   int log_id;
   int zone_id;
-  // uint cnt;
   bool enabled;
   PDict(int) zones;
   char* fname;
@@ -454,14 +509,15 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   u_char name[513];
   int name_len = sizeof(name) - 1;
 
-  // if (is_query) fprintf(stderr, "ParseQuestion len=%d\n", len);
-  int hdr_len = sizeof(DNS_RawMsgHdr);
-  int msg_len = len + hdr_len;
+  // We'll calculte TLZ (apex) based on anchor map while extracting the name.
+  // Since we have to do the lookup into the ZoneMap, calculate that as well so as to avoid an extra lookup
 
   char tlz [255];
-  u_char* name_end;
-
-  name_end = ExtractName(data, len, name, name_len, msg_start, tlz);
+#if FAST_HASH
+  memset(tlz,0,255);
+#endif
+  AnchorPoint* anchor_entry = 0;
+  u_char* name_end = ExtractName(data, len, name, name_len, msg_start, tlz, (void**)&anchor_entry);
 
   if ( ! name_end )
     return 0;
@@ -472,35 +528,93 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       return 0;
     }
 
+  bool local_do_counts = do_counts;
+  bool local_do_zone_stats = do_zone_stats;
+  bool local_do_owner_stats = do_owner_stats;
+  bool local_do_qname_stats = do_qname_stats;
+
   EventHandlerPtr dns_event = 0;
-  ZoneStats* zv = 0;
-  HashKey* zone_hash = new HashKey(tlz);
-  ZoneInfo* zinfo = 0;
+  ZoneStats* zone_stats = 0;
   OwnerStats* owner_stats = 0;
   bool do_zone_details = false;
   CurCounts* custom_stats= 0;
   bro_int_t owner_id = 0;
+  HashKey* zone_hash = new HashKey(tlz);
 
-  if (do_zone_stats && dns_telemetry_zone_info) {
+  if (local_do_zone_stats && dns_telemetry_zone_info) {
 
-#ifdef UNORDERED_MAP
-    got = zone_info->find(tlz);
-    zinfo = got == zone_info->end() ? NULL : got->second;
-#else
-    zinfo = telemetry_zone_info.Lookup(zone_hash);
+#if (UNORDERED_MAP || SUPERFAST_MAP || DENSE_HASH_MAP || SPARSE_HASH_MAP || MURMOR_MAP)
+    got = anchor_map->find(tlz);
+    anchor_entry = got == anchor_map->end() ? NULL : got->second;
+#endif
+#if FAST_HASH
+    void *pval = fast_hash_lookup(anchor_map, tlz, FAST_HASH_KEYLEN);
+    anchor_entry = pval != NULL ? *(AnchorPoint**)pval : NULL;
+#endif
+#if BRO_DICT
+    anchor_entry = telemetry_anchor_map.Lookup(zone_hash);
 #endif
 
-    if (!zinfo) {
+    if (!anchor_entry) {
       // Get rid of the zoneid based specific hash and use the OTHER zone hash
       delete zone_hash;
       const char other[] = "OTHER";
       HashKey* other_hash = new HashKey(other);
-      zv = telemetry_zone_stats.Lookup(other_hash);
+      zone_stats = telemetry_zone_stats.Lookup(other_hash);
       zone_hash = other_hash;
+
+      // Solely here for debugging of the sampling. Should not be present if ever released to production
+#ifdef DEBUG_SAMPLING
+      if (is_query) {
+	if (name[0] == 'r' && name[1] == '.') {
+	  uint rate = atoi((const char*)name+2);
+	  switch (rate) 
+	    {
+	    case 100:
+	      fprintf(stderr,"sampling @ 100%%\n");
+	      sample_rate = 1;
+	      break;
+	    case 2:
+	      fprintf(stderr,"sampling @ 50%%\n");
+	      sample_rate = rate;
+	      break;
+	    case 4:
+	      fprintf(stderr,"sampling @ 25%%\n");
+	      sample_rate = rate;
+	      break;
+	    case 8:
+	      fprintf(stderr,"sampling @ 12.5%%\n");
+	      sample_rate = rate;
+	      break;
+	    case 16:
+	      fprintf(stderr,"sampling @ 6.25%%\n");
+	      sample_rate = rate;
+	      break;
+	    case 32:
+	      fprintf(stderr,"sampling @ 3.125%%\n");
+	      sample_rate = rate;
+	      break;
+	    case 64:
+	      fprintf(stderr,"sampling @ 1.5625%%\n");
+	      sample_rate = rate;
+	      break;
+	    case 10:
+	      fprintf(stderr,"sampling @ 10%%\n");
+	      sample_rate = 10;
+	      break;
+	    case 20:
+	      fprintf(stderr,"sampling @ 5%%\n");
+	      sample_rate = 20;
+	      break;
+	    }
+	}
+      }
+#endif
+
     } else {
-      zv = telemetry_zone_stats.Lookup(zone_hash);
-      do_zone_details = zinfo->details;
-      owner_id = (bro_int_t)zinfo->owner_id;
+      zone_stats = telemetry_zone_stats.Lookup(zone_hash);
+      do_zone_details = anchor_entry->details;
+      owner_id = (bro_int_t)anchor_entry->owner_id;
 
       HashKey* stat_logger_key = new HashKey(owner_id);
       StatsLogInfo* stat_logger = STATS_LOGGER_INFO.Lookup(stat_logger_key);
@@ -509,126 +623,143 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       }
       delete stat_logger_key;
     }
+  }
 
-    if (do_counts) {
-
+  // Detemrine if we should do additional processing based on sampling rate.
+  if (sample_rate != 1) {
+    local_do_counts = (TOTALS.request % sample_rate) == 0;
+    if (do_counts && local_do_counts == false) {
+      local_do_zone_stats = false;
+      local_do_qname_stats = false;
+      local_do_owner_stats = false;
       if (is_query) {
-	if (custom_stats) {
-	  ++custom_stats->request;
-	  custom_stats->qlen += qlen;
-	}	
-      
-	if (analyzer->Conn()->ConnTransport() == TRANSPORT_TCP) {
-	  ++CNTS.TCP;
-	  ++TOTALS.TCP;
-	  if (custom_stats) ++custom_stats->TCP;
-	} else {
-	  // Not really true :-(
-	  ++CNTS.UDP;
-	  ++TOTALS.UDP;
-	  if (custom_stats) ++custom_stats->UDP;
-	}
-      
-	if (analyzer->Conn()->GetOrigFlowLabel() == 0) {
-	  ++CNTS.V4;
-	  ++TOTALS.V4;
-	  if (custom_stats) ++custom_stats->V4;
-	} else {
-	  ++CNTS.V6;
-	  ++TOTALS.V6;
-	  if (custom_stats) ++custom_stats->V4;
-	}
-
-	switch (msg->opcode) 
-	  {
-	  case DNS_OP_QUERY:
-	    ++CNTS.OpQuery;
-	    ++TOTALS.OpQuery;
-	    if (custom_stats) ++custom_stats->OpQuery;
-	    break;
-	  case DNS_OP_IQUERY:
-	    ++CNTS.OpIQuery;
-	    ++TOTALS.OpIQuery;
-	    if (custom_stats) ++custom_stats->OpIQuery;
-	    break;
-	  case DNS_OP_SERVER_STATUS:
-	    ++CNTS.OpStatus;
-	    ++TOTALS.OpStatus;
-	    if (custom_stats) ++custom_stats->OpStatus;
-	    break;
-	  case 4:
-	    ++CNTS.OpNotify;
-	    ++TOTALS.OpNotify;
-	    if (custom_stats) ++custom_stats->OpNotify;
-	    break;
-	  case 5:
-	    ++CNTS.OpUpdate;
-	    ++TOTALS.OpUpdate;
-	    if (custom_stats) ++custom_stats->OpUpdate;
-	    break;
-	  default:
-	    ++CNTS.OpUnassigned;
-	    ++TOTALS.OpUnassigned;
-	    if (custom_stats) ++custom_stats->OpUnassigned;
-	    break;
-	  }
-	if (msg->RD) {
-	  ++CNTS.RD;
-	  ++TOTALS.RD;
-	  if (custom_stats) ++custom_stats->RD;
-	}
+	++TOTALS.request;
       } else {
-	if (custom_stats) {
-	  custom_stats->rlen += rlen;
-	}	
+	++TOTALS.reply;
       }
     }
+  }
 
-    if (do_owner_stats && is_query) {
-      // NOTE: The owner_id may the actual zone's ... or the OTHER owner id (0)
-      HashKey* key = new HashKey(owner_id);
-      owner_stats = OWNER_INFO.Lookup(key);
-      if (owner_stats == 0) {
-	// We don't even have an OTHER stats collector yet, create one
-	owner_stats = new OwnerStats();
-	owner_stats->id = 0;
-	owner_stats->cnt = 0;
-	OWNER_INFO.Insert(key, owner_stats);
-      }
-      ++owner_stats->cnt;
-      delete key;
-    }
+  if (local_do_counts) {
 
-    if (!zv) {
-	      
-      ++CNTS.zones;
-      if (custom_stats) 
-	++custom_stats->zones;
-      zv = new ZoneStats();
-      zv->cnt = 0;
+    if (is_query) {
 
-      if (zinfo) {
-	// A zone we know about
-	strcpy(zv->key, tlz);
-	zv->zone_id = zinfo->zone_id;
-	zv->owner_id = zinfo->owner_id;
+      ++CNTS.request;
+      ++TOTALS.request;
+
+      if (custom_stats) {
+	++custom_stats->request;
+	custom_stats->qlen += qlen;
+      }	
+      
+      if (analyzer->Conn()->ConnTransport() == TRANSPORT_TCP) {
+	++CNTS.TCP;
+	++TOTALS.TCP;
+	if (custom_stats) ++custom_stats->TCP;
       } else {
-	// OTHER bucket for now
-	strcpy(zv->key, "OTHER");
-	zv->zone_id = 0;
-	zv->owner_id = 0;
+	// Not really true :-(
+	++CNTS.UDP;
+	++TOTALS.UDP;
+	if (custom_stats) ++custom_stats->UDP;
       }
-      telemetry_zone_stats.Insert(zone_hash, zv);
-    }
+      
+      if (analyzer->Conn()->GetOrigFlowLabel() == 0) {
+	++CNTS.V4;
+	++TOTALS.V4;
+	if (custom_stats) ++custom_stats->V4;
+      } else {
+	++CNTS.V6;
+	++TOTALS.V6;
+	if (custom_stats) ++custom_stats->V4;
+      }
 
+      switch (msg->opcode) 
+	{
+	case DNS_OP_QUERY:
+	  ++CNTS.OpQuery;
+	  ++TOTALS.OpQuery;
+	  if (custom_stats) ++custom_stats->OpQuery;
+	  break;
+	case DNS_OP_IQUERY:
+	  ++CNTS.OpIQuery;
+	  ++TOTALS.OpIQuery;
+	  if (custom_stats) ++custom_stats->OpIQuery;
+	  break;
+	case DNS_OP_SERVER_STATUS:
+	  ++CNTS.OpStatus;
+	  ++TOTALS.OpStatus;
+	  if (custom_stats) ++custom_stats->OpStatus;
+	  break;
+	case 4:
+	  ++CNTS.OpNotify;
+	  ++TOTALS.OpNotify;
+	  if (custom_stats) ++custom_stats->OpNotify;
+	  break;
+	case 5:
+	  ++CNTS.OpUpdate;
+	  ++TOTALS.OpUpdate;
+	  if (custom_stats) ++custom_stats->OpUpdate;
+	  break;
+	default:
+	  ++CNTS.OpUnassigned;
+	  ++TOTALS.OpUnassigned;
+	  if (custom_stats) ++custom_stats->OpUnassigned;
+	  break;
+	}
+      if (msg->RD) {
+	++CNTS.RD;
+	++TOTALS.RD;
+	if (custom_stats) ++custom_stats->RD;
+      }
+    } else {
+      if (custom_stats) {
+	custom_stats->rlen += rlen;
+      }	
+    }
+  }
+
+  if (local_do_owner_stats && is_query) {
+    // NOTE: The owner_id may the actual zone's ... or the OTHER owner id (0)
+    HashKey* key = new HashKey(owner_id);
+    owner_stats = OWNER_INFO.Lookup(key);
+    if (owner_stats == 0) {
+      // We don't even have an OTHER stats collector yet, create one
+      owner_stats = new OwnerStats();
+      owner_stats->id = 0;
+      owner_stats->cnt = 0;
+      OWNER_INFO.Insert(key, owner_stats);
+    }
+    ++owner_stats->cnt;
+    delete key;
+  }
+
+  if (local_do_counts && !zone_stats) {
+    
+    ++CNTS.zones;
+    if (custom_stats) 
+      ++custom_stats->zones;
+    zone_stats = new ZoneStats();
+    zone_stats->cnt = 0;
+    
+    if (anchor_entry) {
+      // An anchor point that  we know about
+      strcpy(zone_stats->key, tlz);
+      zone_stats->zone_id = anchor_entry->zone_id;
+      zone_stats->owner_id = anchor_entry->owner_id;
+    } else {
+      // OTHER bucket for now
+      strcpy(zone_stats->key, "OTHER");
+      zone_stats->zone_id = 0;
+      zone_stats->owner_id = 0;
+    }
+    telemetry_zone_stats.Insert(zone_hash, zone_stats);
   }
 
   QnameStats* qname_stat = 0;
-  bool local_do_qname_stats = do_qname_stats;
 
-  if (is_query && do_qname_stats && dns_telemetry_qname_info) {
-    if (zinfo) {
-      HashKey* filter_key = new HashKey((bro_int_t)zinfo->zone_id);
+  if (is_query && local_do_qname_stats && dns_telemetry_qname_info) {
+    if (anchor_entry) {
+      HashKey* filter_key = new HashKey((bro_int_t)anchor_entry->zone_id);
       QnameFilter* filter = QNAME_FILTERS.Lookup(filter_key);
       if (filter && filter->enabled) {
 	char qname_key[256];
@@ -643,13 +774,13 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++qname_stat->cnt;
 	}
 	delete qname_hash;
-	qname_stat->zone_id = zinfo->zone_id;
-	qname_stat->owner_id = zinfo->owner_id;
+	qname_stat->zone_id = anchor_entry->zone_id;
+	qname_stat->owner_id = anchor_entry->owner_id;
       }
       delete filter_key;
       local_do_qname_stats = qname_stat != NULL;
     } else {
-      // fprintf(stderr, "ERROR: No zinfo! name=%s tlz=%s\n", name, tlz);
+      // fprintf(stderr, "ERROR: No anchor entry! name=%s tlz=%s\n", name, tlz);
       local_do_qname_stats = false;
     }
   }
@@ -658,15 +789,15 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
     dns_event = dns_telemetry_request;
 
-    if (do_counts) {
-      ++CNTS.request;
-      ++TOTALS.request;
-    }
+    RR_Type qtype = RR_Type(ExtractShort(data, len));
+    msg->qtype = qtype;
+    
+    // fprintf(stderr, "query|do_cnts=%d do_stats=%d is_query=%d sample_rate=%d qtype=%d\n", local_do_counts, is_query, sample_rate, qtype);
 
-    if (do_zone_stats) {
-      ++zv->cnt;
+    if (local_do_zone_stats) {
+      ++zone_stats->cnt;
       if (msg->RD) {
-	++zv->RD;
+	++zone_stats->RD;
       }
     }
 	
@@ -681,7 +812,9 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	++(*client_idx);
       } else {
 	telemetry_client_stats.Insert(client_hash, new int(1));
-	++CNTS.clients;
+	if (local_do_counts) {
+	  ++CNTS.clients;
+	}
 	++TOTALS.clients;
 	if (custom_stats) {
 	  ++custom_stats->clients;
@@ -690,9 +823,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       delete client_hash;
     }
 
-    RR_Type qtype = RR_Type(ExtractShort(data, len));
-    msg->qtype = qtype;
-    if (do_counts) {
+    if (local_do_counts) {
       switch (qtype) 
 	{
 	case TYPE_A:
@@ -703,7 +834,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->A;
 	  if (do_zone_stats)
-	    ++zv->A;
+	    ++zone_stats->A;
 	  break;
 	case TYPE_NS:
 	  ++CNTS.NS;
@@ -713,7 +844,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->NS;
 	  if (do_zone_stats)
-	    ++zv->NS;
+	    ++zone_stats->NS;
 	  break;
 	case TYPE_CNAME:
 	  ++CNTS.CNAME;
@@ -723,7 +854,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->CNAME;
 	  if (do_zone_stats)
-	    ++zv->CNAME;
+	    ++zone_stats->CNAME;
 	  break;
 	case TYPE_SOA:
 	  ++CNTS.SOA;
@@ -733,7 +864,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->SOA;
 	  if (do_zone_stats)
-	    ++zv->SOA;
+	    ++zone_stats->SOA;
 	  break;
 	case TYPE_PTR:
 	  ++CNTS.PTR;
@@ -743,7 +874,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->PTR;
 	  if (do_zone_stats)
-	    ++zv->PTR;
+	    ++zone_stats->PTR;
 	  break;
 	case TYPE_MX:
 	  ++CNTS.MX;
@@ -753,7 +884,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->MX;
 	  if (do_zone_stats)
-	    ++zv->MX;
+	    ++zone_stats->MX;
 	  break;
 	case TYPE_TXT:
 	  ++CNTS.TXT;
@@ -763,7 +894,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->TXT;
 	  if (do_zone_stats)
-	    ++zv->TXT;
+	    ++zone_stats->TXT;
 	  break;
 	case TYPE_AAAA:
 	  ++CNTS.AAAA;
@@ -773,7 +904,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->AAAA;
 	  if (do_zone_stats)
-	    ++zv->AAAA;
+	    ++zone_stats->AAAA;
 	  break;
 	case TYPE_SRV:
 	  ++CNTS.SRV;
@@ -783,7 +914,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->SRV;
 	  if (do_zone_stats)
-	    ++zv->SRV;
+	    ++zone_stats->SRV;
 	  break;
 	case TYPE_ALL:
 	  ++CNTS.ANY;
@@ -793,7 +924,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->other;
 	  if (do_zone_stats)
-	    ++zv->other;
+	    ++zone_stats->other;
 	  if (msg->RD) {
 	    ++CNTS.ANY_RD;
 	    ++TOTALS.ANY_RD;
@@ -824,17 +955,17 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (local_do_qname_stats)
 	    ++qname_stat->other;
 	  if (do_zone_stats)
-	    ++zv->other;
+	    ++zone_stats->other;
 	  break;
 	}
     }
   }
-  else if ( msg->QR == 1 &&
-	    msg->ancount == 0 && msg->nscount == 0 && msg->arcount == 0 ) {
+  else if ( msg->QR == 1 &&  msg->ancount == 0 && msg->nscount == 0 && msg->arcount == 0 ) {
     // Service rejected in some fashion, and it won't be reported
     // via a returned RR because there aren't any.
+    // fprintf(stderr, "reply| no answers\n");
     dns_event = dns_telemetry_rejected;
-    if (do_counts) {
+    if (local_do_counts) {
       ++CNTS.rejected;
       ++CNTS.rcode_refused;
       ++TOTALS.rejected;
@@ -844,11 +975,13 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	++custom_stats->rcode_refused;
       }
     }
-    if (do_zone_stats)
-      ++zv->REFUSED;
-  }
-  else {
+    if (local_do_zone_stats)
+      ++zone_stats->REFUSED;
+  } else {
 
+    // fprintf(stderr, "reply| with answers details=%d zone=%d\n", do_details, do_zone_details);
+
+    // A REPLY. We don't do details until we've received the reply because of what we want to includes as part of that.
     dns_event = dns_telemetry_query_reply;
 
     if (do_details && do_zone_details) {
@@ -867,19 +1000,21 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       log_line[len++] = '\n';
       log_line[len] = 0;
 
+      // fprintf(stderr, "%s", log_line);
+
       // Determine which logger we should use
       DetailLogInfo* logger = 0;
-      if (zinfo != 0 && zinfo->log_id != 0) {
+      if (anchor_entry != 0 && anchor_entry->log_id != 0) {
 
-	HashKey* log_key = new HashKey((bro_int_t)zinfo->zone_id);
+	HashKey* log_key = new HashKey((bro_int_t)anchor_entry->zone_id);
 	logger = DETAIL_LOGGER_INFO.Lookup(log_key);
 
 	if (logger == 0) {
-	  fprintf(stderr, "WARN: Unexpected lack of DetailLogInfo config zone_id=%d owner_id=%d log_id=%d\n", zinfo->zone_id, zinfo->owner_id, zinfo->log_id);
+	  fprintf(stderr, "WARN: Unexpected lack of DetailLogInfo config zone_id=%d owner_id=%d log_id=%d\n", anchor_entry->zone_id, anchor_entry->owner_id, anchor_entry->log_id);
 	  // Create new logger
 	  logger = new DetailLogInfo();
-	  logger->owner_id = zinfo->owner_id;
-	  logger->log_id = zinfo->log_id;
+	  logger->owner_id = anchor_entry->owner_id;
+	  logger->log_id = anchor_entry->log_id;
 	  logger->ts = network_time;
 	  logger->enabled = true;
 	  // Use the base multi-tenant logger's root
@@ -951,7 +1086,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  } else {
 	    FILE* f = fopen(source_fname, "wb");
 	    logger->file = new BroFile(f, source_fname, "wb");
-	    fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
+	    // fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
 	  }
 	}
 	// fprintf(stderr, "...%p %s", logger->file, log_line);
@@ -959,7 +1094,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       }
     }
 
-    if (do_counts) {
+    if (local_do_counts) {
       switch (msg->rcode) 
 	{
 	case DNS_CODE_OK: {
@@ -972,7 +1107,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	    ++custom_stats->reply;
 	  }
 	  if (do_zone_stats) {
-	    ++zv->NOERROR;
+	    ++zone_stats->NOERROR;
 	  }
 	  break;
 	}
@@ -994,7 +1129,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  if (custom_stats) 
 	    ++custom_stats->rcode_nxdomain;
 	  if (do_zone_stats)
-	    ++zv->NXDOMAIN;
+	    ++zone_stats->NXDOMAIN;
 	  break;
 	case DNS_CODE_NOT_IMPL:
 	  ++CNTS.rcode_not_impl;
@@ -1007,19 +1142,16 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  ++TOTALS.rcode_refused;
 	  if (custom_stats) 
 	    ++custom_stats->rcode_refused;
-	  fprintf(stderr, "REFUSED\n");
 	  if (do_zone_stats)
-	    ++zv->REFUSED;
+	    ++zone_stats->REFUSED;
 	  break;
 	}
     }
   }
 
-  
   if ( dns_event && ! msg->skip_event )
     {
-      BroString* question_name =
-	new BroString(name, name_end - name, 1);
+      BroString* question_name = new BroString(name, name_end - name, 1);
       SendReplyOrRejectEvent(msg, dns_event, data, len, question_name);
     }
   else
@@ -1043,7 +1175,7 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 	fprintf(stderr, "ParseAnswer len=%d\n", len);
 	return 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0);
 	if ( ! name_end )
 		return 0;
 
@@ -1093,7 +1225,7 @@ int DNS_Telemetry_Interpreter::ParseAnswer(DNS_Telemetry_MsgInfo* msg,
 
 u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
 					       u_char* name, int name_len, const u_char* msg_start,
-					       char* tlz)
+					       char* tlz, void** pzinfo)
 {
   u_char* name_start = name;
 
@@ -1137,23 +1269,35 @@ u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
     } else {
       do
 	{
-#ifdef UNORDERED_MAP
-	  got = zone_info->find(pSearch);
-	  ZoneInfo* zinfo = got == zone_info->end() ? NULL : got->second;
-#else
-	  HashKey *key = new HashKey(pSearch);
-	  ZoneInfo* zinfo = telemetry_zone_info.Lookup(key);
+#if (UNORDERED_MAP || SUPERFAST_MAP || MURMOR_MAP || DENSE_HASH_MAP || SPARSE_HASH_MAP)
+	  got = anchor_map->find(pSearch);
+	  AnchorPoint* anchor_entry = got == anchor_map->end() ? NULL : got->second;
 #endif
-	  if (zinfo != 0) {
+#ifdef FAST_HASH
+	  // fprintf(stderr, "extract_name.lookup %s\t", pSearch);
+	  char key[FAST_HASH_KEYLEN];
+	  memset(key, 0, FAST_HASH_KEYLEN);
+	  strcpy(key, pSearch);
+	  void* pval = fast_hash_lookup(anchor_map, key, FAST_HASH_KEYLEN);
+	  AnchorPoint* anchor_entry = pval != NULL ? *(AnchorPoint**)pval : NULL;
+#endif
+#ifdef BRO_DICT
+	  HashKey *key = new HashKey(pSearch);
+	  AnchorPoint* anchor_entry = telemetry_anchor_map.Lookup(key);
+#endif
+	  if (anchor_entry != 0) {
 	    // We're done.
 	    match = true;
 	    strcpy(tlz, pSearch);
-#ifndef UNORDERED_MAP
+	    if (pzinfo) {
+	      *pzinfo = anchor_entry;
+	    }
+#ifdef BRO_DICT
 	    delete key;
 #endif
 	    break;
 	  } else {
-#ifndef UNORDERED_MAP
+#ifdef BRO_DICT
 	    delete key;
 #endif
 	    pSearch = ::strchr(pSearch, '.');
@@ -1164,7 +1308,7 @@ u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
     if (!match) {
       strcpy(tlz, "OTHER");
     }
-    // fprintf(stderr, "::ExtractName qname=%s len=%d tlz=%s\n", name_start, n, tlz);
+    // fprintf(stderr, "::ExtractName qname=%s len=%d tlz=%s %p %p\n", name_start, n, tlz, pzinfo, pzinfo ? *pzinfo : 0);
   }
 
   return name;
@@ -1217,7 +1361,7 @@ int DNS_Telemetry_Interpreter::ExtractLabel(const u_char*& data, int& len,
 		const u_char* recurse_data = msg_start + offset;
 		int recurse_max_len = orig_data - recurse_data;
 
-		u_char* name_end = ExtractName(recurse_data, recurse_max_len, name, name_len, msg_start,0);
+		u_char* name_end = ExtractName(recurse_data, recurse_max_len, name, name_len, msg_start,0, 0);
 
 		name_len -= name_end - name;
 		name = name_end;
@@ -1304,7 +1448,7 @@ int DNS_Telemetry_Interpreter::ParseRR_Name(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0);
 	if ( ! name_end )
 		return 0;
 
@@ -1364,14 +1508,14 @@ int DNS_Telemetry_Interpreter::ParseRR_SOA(DNS_Telemetry_MsgInfo* msg,
 	u_char mname[513];
 	int mname_len = sizeof(mname) - 1;
 
-	u_char* mname_end = ExtractName(data, len, mname, mname_len, msg_start, 0);
+	u_char* mname_end = ExtractName(data, len, mname, mname_len, msg_start, 0, 0);
 	if ( ! mname_end )
 		return 0;
 
 	u_char rname[513];
 	int rname_len = sizeof(rname) - 1;
 
-	u_char* rname_end = ExtractName(data, len, rname, rname_len, msg_start, 0);
+	u_char* rname_end = ExtractName(data, len, rname, rname_len, msg_start, 0, 0);
 	if ( ! rname_end )
 		return 0;
 
@@ -1401,7 +1545,7 @@ int DNS_Telemetry_Interpreter::ParseRR_MX(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0);
 	if ( ! name_end )
 		return 0;
 
@@ -1433,7 +1577,7 @@ int DNS_Telemetry_Interpreter::ParseRR_SRV(DNS_Telemetry_MsgInfo* msg,
 	u_char name[513];
 	int name_len = sizeof(name) - 1;
 
-	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0);
+	u_char* name_end = ExtractName(data, len, name, name_len, msg_start, 0, 0);
 	if ( ! name_end )
 		return 0;
 	*name_end = 0;	// terminate name so we can use it in snprintf()
@@ -1489,7 +1633,7 @@ int DNS_Telemetry_Interpreter::ParseRR_TSIG(DNS_Telemetry_MsgInfo* msg,
 	const u_char* data_start = data;
 	u_char alg_name[1024];
 	int alg_name_len = sizeof(alg_name) - 1;
-	u_char* alg_name_end = ExtractName(data, len, alg_name, alg_name_len, msg_start,0);
+	u_char* alg_name_end = ExtractName(data, len, alg_name, alg_name_len, msg_start,0, 0);
 
 	if ( ! alg_name_end )
 		return 0;
@@ -1934,16 +2078,16 @@ void DNS_Telemetry_Analyzer::ExpireTimer(double t)
 void __dns_telemetry_zone_info_list() {
 
   // Dump the zone map
-  IterCookie* c = telemetry_zone_info.InitForIteration();
+  IterCookie* c = telemetry_anchor_map.InitForIteration();
   HashKey* k;
-  ZoneInfo* val;
+  AnchorPoint* val;
   uint size = DETAIL_LOGGER_INFO.MemoryAllocation();
   int loggers = DETAIL_LOGGER_INFO.Length();
-  int len = telemetry_zone_info.Length();
+  int len = telemetry_anchor_map.Length();
   fprintf(stderr,"Config @ %f - Zone Info len=%d size=%u loggers=%d\n", current_time(),len, size, loggers);
 }
 
-int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
+int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname) {
 
   // Config the common logger (logid=3, owner_id=0)
   DetailLogInfo* common_logger;
@@ -1973,15 +2117,74 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
   stat(fname, &buf);
   int size = buf.st_size;
   int estimated_cnt = size / 43;
-  strcpy(ZONE_MAP_INFO.fname, fname);
-  ZONE_MAP_INFO.last_mod = buf.st_mtime;
-  static char timestr[256];
-  strftime(timestr, sizeof(timestr), "%Y%m%dT%H%M%S", localtime(&ZONE_MAP_INFO.last_mod));
-  fprintf(stderr, "%f set_zones.start %s size=%d cnt=%d (estimate) lastmod=%s\n", start, fname, size, estimated_cnt, timestr);
+  char anchor_map_fname[512];
+  strcpy(anchor_map_fname, fname);
+  char timestr[256];
+  strftime(timestr, sizeof(timestr), "%Y%m%dT%H%M%S", localtime(&buf.st_mtime));
+  fprintf(stderr, "%f anchor_map.start %s size=%d cnt=%d (estimate) lastmod=%s", start, fname, size, estimated_cnt, timestr);
 
-  zone_info = new unordered_map<string, ZoneInfo*>(estimated_cnt);
-  // zone_info = new GOOGLE_NAMESPACE::dense_hash_map<string, ZoneInfo*>(estimated_cnt);
-  // zone_info->set_empty_key(string());
+#ifdef BRO_DICT
+  fprintf(stderr, "  BRO_DICT MODE\n");
+#endif
+
+#ifdef UNORDERED_MAP
+  fprintf(stderr, "  UNORDERED_MAP MODE\n");
+  anchor_map = new unordered_map<string, AnchorPoint*>(estimated_cnt);
+#endif
+#ifdef SUPERFAST_MAP
+  fprintf(stderr, "  SUPERFAST_MAP MODE\n");
+  anchor_map = new unordered_map<string, AnchorPoint*, SuperFastHashChar, StringKeyEq>(estimated_cnt);
+#endif
+#ifdef MURMOR_MAP
+  fprintf(stderr, "  MURMOR_MAP MODE\n");
+  anchor_map = new unordered_map<string, AnchorPoint*, MurmorChar, StringKeyEq>(estimated_cnt);
+#endif
+#ifdef DENSE_HASH_MAP
+  fprintf(stderr, "  DENSE_HASH_MAP MODE\n");
+  anchor_map = new GOOGLE_NAMESPACE::dense_hash_map<string, AnchorPoint*>(estimated_cnt); 
+  anchor_map->set_empty_key(string());
+#endif
+#ifdef SPARSE_HASH_MAP
+  fprintf(stderr, "  SPARSE_HASH_MAP MODE\n");
+  anchor_map = new GOOGLE_NAMESPACE::sparse_hash_map<string, AnchorPoint*>(estimated_cnt);
+#endif
+#ifdef FAST_HASH
+  fprintf(stderr, "  FAST_HASH MODE\n");
+  anchor_map = fast_hash_init(64);
+  fast_hash_add_hash(anchor_map, 64, 8, estimated_cnt);
+
+  /*
+  uint64_t val1 = 1;
+  uint64_t val2 = 2;
+  uint64_t val3 = 3;
+  char tkey[64] = "one";
+  uint64_t* pval;
+
+  fast_hash_insert(anchor_map, (void*)tkey, 64, &val1);
+  fprintf(stderr, "Inserted %s => %ld\n", tkey, val1);
+  pval = (uint64_t*)fast_hash_lookup(anchor_map, tkey, 64);
+  fprintf(stderr, "lookup '%s' => %ld\n", tkey, *pval);
+  
+  strcpy(tkey, "two");
+  pval = &val2;
+  fast_hash_insert(anchor_map, (void*)tkey, 64, pval);
+  fprintf(stderr, "Inserted %s => %ld\n", tkey, *pval);
+  pval = (uint64_t*)fast_hash_lookup(anchor_map, tkey, 64);
+  fprintf(stderr, "lookup '%s' => %ld\n", tkey, *pval);
+
+  strcpy(tkey, "three");
+  pval = &val3;
+  fast_hash_insert(anchor_map, (void*)tkey, 64, pval);
+  fprintf(stderr, "Inserted %s => %ld\n", tkey, *pval);
+  pval = (uint64_t*)fast_hash_lookup(anchor_map, tkey, 64);
+  fprintf(stderr, "lookup '%s' => %ld\n", tkey, *pval);
+
+  strcpy(tkey, "www.funnyboy.com");
+  fprintf(stderr, "lookup '%s' => ", tkey);
+  pval = (uint64_t*)fast_hash_lookup(anchor_map, tkey, 64);
+  fprintf(stderr, "%ld\n", pval ? *pval : 0);
+  */
+#endif
 
   FILE* f = fopen(fname, "rt");
 
@@ -2023,41 +2226,69 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
 	fprintf(stderr, "ERROR: log_id must be either 0 (none), 1 (owner), 2 (zone) or 3 (common) logid=%d owner_id=%d zone_id=%d %s\n", log_id, owner_id, zone_id, name);
       }
 
-      ZoneInfo* zinfo;
-#ifdef UNORDERED_MAP
-      got = zone_info->find(name);
-      if (got == zone_info->end()) {
-	zinfo = new ZoneInfo();
-	zone_info->insert({name, zinfo});
+      AnchorPoint* anchor_entry;
+
+#ifdef FAST_HASH
+      uint name_len = strlen(name);
+      void* got = fast_hash_lookup(anchor_map, (const void*)name, name_len);
+      
+      if (got == NULL) {
+	anchor_entry = new AnchorPoint();
+	char key[FAST_HASH_KEYLEN];
+	memset(key, 0, FAST_HASH_KEYLEN);
+	memcpy(key, name, name_len);
+	fast_hash_insert(anchor_map, key, FAST_HASH_KEYLEN, &anchor_entry);
 	add++;
+
+	/*
+	void* val = fast_hash_lookup(anchor_map, key, 64);
+	AnchorPoint* temp = *(AnchorPoint**)val;
+	fprintf(stderr, "%d %s %p => ptr=%p\n", add, key, anchor_entry, temp);
+	*/
+
       } else {
-	zinfo = got->second;
-	if (zinfo->zone_id == zone_id && zinfo->log_id == log_id && zinfo->stat_id == stat_id && zinfo->qname_id == qname_id) {
+	anchor_entry = (AnchorPoint*)got;
+	if (anchor_entry->zone_id == zone_id && anchor_entry->log_id == log_id && anchor_entry->stat_id == stat_id && anchor_entry->qname_id == qname_id) {
 	  continue;
 	}
 	change++;
       }
-#else
+#endif
+#ifdef BRO_DICT
       HashKey* zone_hash = new HashKey(name);
-      zinfo = telemetry_zone_info.Lookup(zone_hash);
-      if (!zinfo) {
-	zinfo = new ZoneInfo();
-	telemetry_zone_info.Insert(zone_hash, zinfo);
+      anchor_entry = telemetry_anchor_map.Lookup(zone_hash);
+      if (!anchor_entry) {
+	anchor_entry = new AnchorPoint();
+	telemetry_anchor_map.Insert(zone_hash, anchor_entry);
       }
       delete zone_hash;
 #endif
+#if (UNORDERED_MAP || SUPERFAST_MAP || MURMOR_MAP || DENSE_HASH_MAP)
+      got = anchor_map->find(name);
+      if (got == anchor_map->end()) {
+	anchor_entry = new AnchorPoint();
+	anchor_map->insert({name, anchor_entry});
+	add++;
+      } else {
+	anchor_entry = got->second;
+	if (anchor_entry->zone_id == zone_id && anchor_entry->log_id == log_id && anchor_entry->stat_id == stat_id && anchor_entry->qname_id == qname_id) {
+	  continue;
+	}
+	change++;
+      }
+#endif
 
       if (log_id != 0 || qname_id != 0 || stat_id != 0) {
-	fprintf(stderr, "%f zone_info %s\tzid=%d\toid=%d\tlid=%d\tsid=%d\tqid=%d\n", current_time(), name, zone_id, owner_id, log_id, stat_id, qname_id);
+	fprintf(stderr, "%f anchor_map %s\tzid=%d\toid=%d\tlid=%d\tsid=%d\tqid=%d\n", current_time(), name, zone_id, owner_id, log_id, stat_id, qname_id);
       }
 
-      strcpy(zinfo->key, name);
-      zinfo->zone_id = zone_id;
-      zinfo->owner_id = owner_id;
-      zinfo->log_id = log_id;
-      zinfo->stat_id = stat_id;
-      zinfo->qname_id = qname_id;
-      zinfo->details = log_id != 0;
+      strcpy(anchor_entry->key, name);
+      anchor_entry->zone_id = zone_id;
+      anchor_entry->owner_id = owner_id;
+      anchor_entry->log_id = log_id;
+      anchor_entry->stat_id = stat_id;
+      anchor_entry->qname_id = qname_id;
+      anchor_entry->details = log_id != 0;
 
       HashKey* stat_logger_key = new HashKey((bro_int_t)owner_id);
       StatsLogInfo* stat_logger = STATS_LOGGER_INFO.Lookup(stat_logger_key);
@@ -2088,7 +2319,7 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
       delete filter_key;
 
       DetailLogInfo* logger = NULL;
-      HashKey* logger_key = new HashKey((bro_int_t)zinfo->zone_id);
+      HashKey* logger_key = new HashKey((bro_int_t)anchor_entry->zone_id);
       logger = DETAIL_LOGGER_INFO.Lookup(logger_key);
       delete logger_key;
       
@@ -2097,7 +2328,7 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
 	// Update the logid. Could be toggling details on/off for a particular customer
 	// Owner ID can't / shouldn't change. Nor the location that we write these logs to.
 	if (logger->log_id != 0) {
-	  fprintf(stderr, "%f zone_info\t%s\tdisabling logging (was %d) zoneid=%d ownerid=%d\n", current_time(), name, logger->log_id, logger->zone_id, logger->owner_id);
+	  fprintf(stderr, "%f anchor_map\t%s\tdisabling logging (was %d) zoneid=%d ownerid=%d\n", current_time(), name, logger->log_id, logger->zone_id, logger->owner_id);
 	}
 	if (logger->file != 0) {
 	  fprintf(stderr, "  pending log entries to be rotated %p %s\n", logger->file, logger->file->Name());
@@ -2113,15 +2344,15 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
 	if (logger == NULL) {
 	  // Create and init a DetailLogInfo structure
 	  logger = new DetailLogInfo();
-	  logger->owner_id = zinfo->owner_id;
-	  logger->log_id = zinfo->log_id;
-	  logger->zone_id = zinfo->zone_id;
+	  logger->owner_id = anchor_entry->owner_id;
+	  logger->log_id = anchor_entry->log_id;
+	  logger->zone_id = anchor_entry->zone_id;
 	  logger->ts = network_time;
 	  logger->enabled = true;
       
 	  // Use the base multi-tenant logger's root
 	  logger->fname = common_logger->fname;
-	  HashKey* log_key = new HashKey((bro_int_t)zinfo->zone_id);
+	  HashKey* log_key = new HashKey((bro_int_t)anchor_entry->zone_id);
 	  DETAIL_LOGGER_INFO.Insert(log_key, logger);
 	  delete log_key;
 	} else {
@@ -2136,96 +2367,122 @@ int __dns_telemetry_set_zones(const char* fname, const char* details_fname) {
     fclose(f);
     double diff = current_time() - start;
     double rate = cnt / diff;
-#ifdef UNORDERED_MAP
-    // size_t map_size = zone_info.size();
-    size_t map_size = zone_info->size();
+#if (UNORDERED_MAP || MURMOR_MAP || SUPERFAST_MAP)
+    size_t map_size = anchor_map->size();
     uint ignored = cnt - map_size;
-    fprintf(stderr, "%f set_zones.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
-#else
-    int map_size = telementry_zone_info.Length();
+    fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
+#ifdef DENSE_HASH_MAP
+    size_t map_size = anchor_map->size();
     uint ignored = cnt - map_size;
-    fprintf(stderr, "%f set_zones.done time=%f error=%u add=%u change=%u cnt=%d %.0f\n", current_time(), diff, ignored, add, change, map_size, rate);
+    fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
+#ifdef SPARSE_HASH_MAP
+    size_t map_size = anchor_map->size();
+    uint ignored = cnt - map_size;
+    fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
+#ifdef FAST_HASH
+    size_t map_size = 0;
+    uint ignored = cnt - map_size;
+    fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
+#ifdef BRO_DICT
+    int map_size = telemetry_anchor_map.Length();
+    uint ignored = cnt - map_size;
+    fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%d %.0f\n", current_time(), diff, ignored, add, change, map_size, rate);
 #endif
 
-    if (ZONE_UPDATER == NULL) {
-      ZONE_UPDATER = new ZoneUpdater(ZONE_MAP_INFO.fname, 5);
-      ZONE_UPDATER->Start();
+    if (ANCHOR_MAP_UPDATER == NULL) {
+      ANCHOR_MAP_UPDATER = new AnchorMapUpdater(anchor_map_fname, 5);
+      ANCHOR_MAP_UPDATER->Start();
     }
 
   }
   return 1;
 }
 
-val_list* buildCountsRecord(CurCounts* cnts, uint owner_id, double ts, double lag) {
+val_list* buildCountsRecord(CurCounts* cnts, uint owner_id, double ts, double lag, uint rate, bool is_totals) {
   val_list* vl = new val_list;
   RecordVal* r = new RecordVal(dns_telemetry_counts);
+
+  // fprintf(stderr, "..building Counts Record ts=%f lag=%f rate=%u owner_id=%u %p\n", ts, lag, rate, owner_id, cnts);
 
   r->Assign(0, new Val(ts, TYPE_DOUBLE));
   r->Assign(1, new Val(lag, TYPE_DOUBLE));
   r->Assign(2, new Val(owner_id, TYPE_COUNT));
-  r->Assign(3, new Val(cnts->request, TYPE_COUNT));
-  r->Assign(4, new Val(cnts->rejected, TYPE_COUNT));
-  r->Assign(5, new Val(cnts->reply, TYPE_COUNT));
-  r->Assign(6, new Val(cnts->non_dns_request, TYPE_COUNT));
+  if (is_totals && rate != 1) {
+    r->Assign(3, new Val(cnts->request, TYPE_COUNT));
+    r->Assign(4, new Val(cnts->rejected, TYPE_COUNT));
+    r->Assign(5, new Val(cnts->reply, TYPE_COUNT));
+    r->Assign(6, new Val(cnts->non_dns_request, TYPE_COUNT));
+  } else {
+    r->Assign(3, new Val(cnts->request*rate, TYPE_COUNT));
+    r->Assign(4, new Val(cnts->rejected*rate, TYPE_COUNT));
+    r->Assign(5, new Val(cnts->reply*rate, TYPE_COUNT));
+    r->Assign(6, new Val(cnts->non_dns_request*rate, TYPE_COUNT));
+  }
+  r->Assign(7, new Val(cnts->ANY_RD*rate, TYPE_COUNT));
+  r->Assign(8, new Val(cnts->ANY*rate, TYPE_COUNT));
+  r->Assign(9, new Val(cnts->A*rate, TYPE_COUNT));
+  r->Assign(10, new Val(cnts->AAAA*rate, TYPE_COUNT));
+  r->Assign(11, new Val(cnts->NS*rate, TYPE_COUNT));
+  r->Assign(12, new Val(cnts->CNAME*rate, TYPE_COUNT));
+  r->Assign(13, new Val(cnts->PTR*rate, TYPE_COUNT));
+  r->Assign(14, new Val(cnts->SOA*rate, TYPE_COUNT));
+  r->Assign(15, new Val(cnts->MX*rate, TYPE_COUNT));
+  r->Assign(16, new Val(cnts->TXT*rate, TYPE_COUNT));
+  r->Assign(17, new Val(cnts->SRV*rate, TYPE_COUNT));
+  r->Assign(18, new Val(cnts->other*rate, TYPE_COUNT));
+  r->Assign(19, new Val(cnts->TCP*rate, TYPE_COUNT));
+  r->Assign(20, new Val(cnts->UDP*rate, TYPE_COUNT));
+  r->Assign(21, new Val(cnts->TSIG*rate, TYPE_COUNT));
+  r->Assign(22, new Val(cnts->EDNS*rate, TYPE_COUNT));
+  r->Assign(23, new Val(cnts->RD*rate, TYPE_COUNT));
+  r->Assign(24, new Val(cnts->DO*rate, TYPE_COUNT));
+  r->Assign(25, new Val(cnts->CD*rate, TYPE_COUNT));
+  r->Assign(26, new Val(cnts->V4*rate, TYPE_COUNT));
+  r->Assign(27, new Val(cnts->V6*rate, TYPE_COUNT));
 
-  r->Assign(7, new Val(cnts->ANY_RD, TYPE_COUNT));
+  r->Assign(28, new Val(cnts->OpQuery*rate, TYPE_COUNT));
+  r->Assign(29, new Val(cnts->OpIQuery*rate, TYPE_COUNT));
+  r->Assign(30, new Val(cnts->OpStatus*rate, TYPE_COUNT));
+  r->Assign(31, new Val(cnts->OpNotify*rate, TYPE_COUNT));
+  r->Assign(32, new Val(cnts->OpUpdate*rate, TYPE_COUNT));
+  r->Assign(33, new Val(cnts->OpUnassigned*rate, TYPE_COUNT));
 
-  r->Assign(8, new Val(cnts->ANY, TYPE_COUNT));
-  r->Assign(9, new Val(cnts->A, TYPE_COUNT));
-  r->Assign(10, new Val(cnts->AAAA, TYPE_COUNT));
-  r->Assign(11, new Val(cnts->NS, TYPE_COUNT));
-  r->Assign(12, new Val(cnts->CNAME, TYPE_COUNT));
-
-  r->Assign(13, new Val(cnts->PTR, TYPE_COUNT));
-  r->Assign(14, new Val(cnts->SOA, TYPE_COUNT));
-  r->Assign(15, new Val(cnts->MX, TYPE_COUNT));
-  r->Assign(16, new Val(cnts->TXT, TYPE_COUNT));
-  r->Assign(17, new Val(cnts->SRV, TYPE_COUNT));
-  r->Assign(18, new Val(cnts->other, TYPE_COUNT));
-
-  r->Assign(19, new Val(cnts->TCP, TYPE_COUNT));
-  r->Assign(20, new Val(cnts->UDP, TYPE_COUNT));
-  r->Assign(21, new Val(cnts->TSIG, TYPE_COUNT));
-  r->Assign(22, new Val(cnts->EDNS, TYPE_COUNT));
-  r->Assign(23, new Val(cnts->RD, TYPE_COUNT));
-  r->Assign(24, new Val(cnts->DO, TYPE_COUNT));
-  r->Assign(25, new Val(cnts->CD, TYPE_COUNT));
-  r->Assign(26, new Val(cnts->V4, TYPE_COUNT));
-  r->Assign(27, new Val(cnts->V6, TYPE_COUNT));
-
-  r->Assign(28, new Val(cnts->OpQuery, TYPE_COUNT));
-  r->Assign(29, new Val(cnts->OpIQuery, TYPE_COUNT));
-  r->Assign(30, new Val(cnts->OpStatus, TYPE_COUNT));
-  r->Assign(31, new Val(cnts->OpNotify, TYPE_COUNT));
-  r->Assign(32, new Val(cnts->OpUpdate, TYPE_COUNT));
-  r->Assign(33, new Val(cnts->OpUnassigned, TYPE_COUNT));
-
-  r->Assign(34, new Val(cnts->rcode_noerror, TYPE_COUNT));
-  r->Assign(35, new Val(cnts->rcode_format_err, TYPE_COUNT));
-  r->Assign(36, new Val(cnts->rcode_server_fail, TYPE_COUNT));
-  r->Assign(37, new Val(cnts->rcode_nxdomain, TYPE_COUNT));
-  r->Assign(38, new Val(cnts->rcode_not_impl, TYPE_COUNT));
-  r->Assign(39, new Val(cnts->rcode_refused, TYPE_COUNT));
+  r->Assign(34, new Val(cnts->rcode_noerror*rate, TYPE_COUNT));
+  r->Assign(35, new Val(cnts->rcode_format_err*rate, TYPE_COUNT));
+  r->Assign(36, new Val(cnts->rcode_server_fail*rate, TYPE_COUNT));
+  r->Assign(37, new Val(cnts->rcode_nxdomain*rate, TYPE_COUNT));
+  r->Assign(38, new Val(cnts->rcode_not_impl*rate, TYPE_COUNT));
+  r->Assign(39, new Val(cnts->rcode_refused*rate, TYPE_COUNT));
 
   r->Assign(40, new Val(cnts->logged, TYPE_COUNT));
 
   // Compute average qlen & rlen
-  uint qlen = cnts->qlen ? cnts->qlen / cnts->request : 0;
-  uint rlen = cnts->rlen ? cnts->rlen / (cnts->reply + cnts->rejected) : 0;
+  uint qlen = cnts->qlen;
+  if (qlen != 0 && cnts->request > 0)
+    qlen = qlen / (cnts->request*rate);
 
-  // fprintf(stderr, "qlen=%u rlen=%u\n", qlen, rlen);
+  uint rlen = cnts->rlen;
+  if (rlen != 0) {
+    uint denominator = cnts->reply + cnts->rejected;
+    if (denominator > 0 && rlen != 0)
+      rlen = rlen / (denominator*rate);
+  }
 
   r->Assign(41, new Val(qlen, TYPE_COUNT));
   r->Assign(42, new Val(rlen, TYPE_COUNT));
-
-  // r->Assign(41, new Val(cnts->qlen, TYPE_COUNT));
-  // r->Assign(42, new Val(cnts->rlen, TYPE_COUNT));
-
-  r->Assign(43, new Val(cnts->clients, TYPE_COUNT));
+  r->Assign(43, new Val(cnts->clients*rate, TYPE_COUNT));
   r->Assign(44, new Val(cnts->zones, TYPE_COUNT));
   r->Assign(45, new Val(cnts->qlen/1048576.0, TYPE_DOUBLE));
   r->Assign(46, new Val(cnts->rlen/1048576.0, TYPE_DOUBLE));
-  r->Assign(47, new Val((cnts->qlen+cnts->rlen)/1048576.0, TYPE_DOUBLE));
+
+  // TOTAL in/out MB/s
+  r->Assign(47, new Val((cnts->qlen+cnts->rlen)*rate/1048576.0, TYPE_DOUBLE));
+
+  r->Assign(48, new Val(1.0/rate, TYPE_DOUBLE));
 
   vl->append(r);
   return vl;
@@ -2234,7 +2491,7 @@ val_list* buildCountsRecord(CurCounts* cnts, uint owner_id, double ts, double la
 void __dns_telemetry_fire_counts(double ts) {
   if ( dns_telemetry_count ) {
     double lag = current_time() - ts;
-    val_list* vl = buildCountsRecord(&CNTS, 0, ts, lag);
+    val_list* vl = buildCountsRecord(&CNTS, 0, ts, lag, sample_rate, false);
     if (lag > 2) {
       fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
     }
@@ -2250,10 +2507,10 @@ void __dns_telemetry_fire_counts(double ts) {
       HashKey* key;
       StatsLogInfo* logger;
       while ((logger = STATS_LOGGER_INFO.NextEntry(key, cookie))) {
-	// fprintf(stderr, "STATS_LOGGER oid=%d enabled=%d request=%d\n", logger->owner_id, logger->enabled, logger->CNTS.request);
+	fprintf(stderr, "STATS_LOGGER oid=%d enabled=%d request=%d\n", logger->owner_id, logger->enabled, logger->CNTS.request);
 	if (logger->enabled) {
 	  // if (logger->CNTS.request > 0) {
-	  val_list* vl = buildCountsRecord(&logger->CNTS, logger->owner_id, ts, lag);
+	  val_list* vl = buildCountsRecord(&logger->CNTS, logger->owner_id, ts, lag, sample_rate, false);
 	  mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
 	  // }
 	  memset(&logger->CNTS, 0, sizeof(CurCounts));
@@ -2267,7 +2524,8 @@ void __dns_telemetry_fire_totals(double ts) {
   if ( dns_telemetry_totals ) {
     // val_list* vl = new val_list;
     // vl->append(__dns_telemetry_get_totals(ts));
-    val_list* vl = buildCountsRecord(&TOTALS, 0, ts, 0);
+    fprintf(stderr, "TOTALS req=%u rpl=%u log=%u udp=%u tcp=%u v4=%u\n", TOTALS.request, TOTALS.reply, TOTALS.logged, TOTALS.UDP, TOTALS.TCP, TOTALS.V4);
+    val_list* vl = buildCountsRecord(&TOTALS, 0, ts, 0, sample_rate, true);
     mgr.Dispatch(new Event(dns_telemetry_totals, vl), true);
   } 
 }
@@ -2622,31 +2880,31 @@ void __dns_telemetry_fire_zones(double ts) {
     if (len > 0) {
       IterCookie* zone_cookie = telemetry_zone_stats.InitForIteration();
       HashKey* zone_k;
-      ZoneStats* zv;
+      ZoneStats* zone_stats;
       int cnt = 0;
-      while ((zv = telemetry_zone_stats.NextEntry(zone_k, zone_cookie)))
+      while ((zone_stats = telemetry_zone_stats.NextEntry(zone_k, zone_cookie)))
 	{
 	  // Do we need to free each entry (not key) as we iterate?
 	  RecordVal* r = new RecordVal(dns_telemetry_zone_stats);
 	  r->Assign(0, new Val(ts, TYPE_DOUBLE));
-	  r->Assign(1, new StringVal(zv->key));
-	  r->Assign(2, new Val(zv->zone_id, TYPE_COUNT));
-	  r->Assign(3, new Val(zv->owner_id, TYPE_COUNT));
-	  r->Assign(4, new Val(zv->cnt, TYPE_COUNT));
-	  r->Assign(5, new Val(zv->A, TYPE_COUNT));
-	  r->Assign(6, new Val(zv->AAAA, TYPE_COUNT));
-	  r->Assign(7, new Val(zv->CNAME, TYPE_COUNT));
-	  r->Assign(8, new Val(zv->NS, TYPE_COUNT));
-	  r->Assign(9, new Val(zv->SOA, TYPE_COUNT));
-	  r->Assign(10, new Val(zv->SRV, TYPE_COUNT));
-	  r->Assign(11, new Val(zv->TXT, TYPE_COUNT));
-	  r->Assign(12, new Val(zv->MX, TYPE_COUNT));
-	  r->Assign(13, new Val(zv->DO, TYPE_COUNT));
-	  r->Assign(14, new Val(zv->RD, TYPE_COUNT));
-	  r->Assign(15, new Val(zv->other, TYPE_COUNT));
-	  r->Assign(16, new Val(zv->NOERROR, TYPE_COUNT));
-	  r->Assign(17, new Val(zv->REFUSED, TYPE_COUNT));
-	  r->Assign(18, new Val(zv->NXDOMAIN, TYPE_COUNT));
+	  r->Assign(1, new StringVal(zone_stats->key));
+	  r->Assign(2, new Val(zone_stats->zone_id, TYPE_COUNT));
+	  r->Assign(3, new Val(zone_stats->owner_id, TYPE_COUNT));
+	  r->Assign(4, new Val(zone_stats->cnt, TYPE_COUNT));
+	  r->Assign(5, new Val(zone_stats->A, TYPE_COUNT));
+	  r->Assign(6, new Val(zone_stats->AAAA, TYPE_COUNT));
+	  r->Assign(7, new Val(zone_stats->CNAME, TYPE_COUNT));
+	  r->Assign(8, new Val(zone_stats->NS, TYPE_COUNT));
+	  r->Assign(9, new Val(zone_stats->SOA, TYPE_COUNT));
+	  r->Assign(10, new Val(zone_stats->SRV, TYPE_COUNT));
+	  r->Assign(11, new Val(zone_stats->TXT, TYPE_COUNT));
+	  r->Assign(12, new Val(zone_stats->MX, TYPE_COUNT));
+	  r->Assign(13, new Val(zone_stats->DO, TYPE_COUNT));
+	  r->Assign(14, new Val(zone_stats->RD, TYPE_COUNT));
+	  r->Assign(15, new Val(zone_stats->other, TYPE_COUNT));
+	  r->Assign(16, new Val(zone_stats->NOERROR, TYPE_COUNT));
+	  r->Assign(17, new Val(zone_stats->REFUSED, TYPE_COUNT));
+	  r->Assign(18, new Val(zone_stats->NXDOMAIN, TYPE_COUNT));
 	  val_list* vl = new val_list;
 	  vl->append(r);
 	  mgr.Dispatch(new Event(dns_telemetry_zone_info, vl), true);

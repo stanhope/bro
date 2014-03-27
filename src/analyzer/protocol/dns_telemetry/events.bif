@@ -146,8 +146,10 @@ extern bool do_client_stats;
 extern bool do_counts;
 extern bool do_totals;
 extern bool do_details;
+extern bool do_samples;
+extern uint sample_rate;
 
-extern int  __dns_telemetry_set_zones(const char* zones_fname, const char* details_fname);
+extern int  __dns_telemetry_load_anchor_map(const char* zones_fname, const char* details_fname);
 
 extern void __dns_telemetry_fire_counts(double ts);
 extern void __dns_telemetry_fire_totals(double ts);
@@ -256,6 +258,18 @@ function dns_telemetry_set_do_counts%(enable:bool%): any
 	return 0;
 %}
 
+function dns_telemetry_get_sample_rate%(%): count
+%{
+	return new Val(sample_rate, TYPE_COUNT);
+%}
+
+function dns_telemetry_set_sample_rate%(rate:count%): count
+%{
+	int old_rate = sample_rate;
+	sample_rate = rate;
+	return new Val(old_rate, TYPE_COUNT);
+%}
+
 # Sure, a little ugly. But it accomplishes what I need. 
 # See analyzers/protocols/dns_telemetry/DNS.cc for what this is about.
 function dns_telemetry_set_do_details%(enable:bool%): any
@@ -270,10 +284,17 @@ function dns_telemetry_set_do_totals%(enable:bool%): any
 	return 0;
 %}
 
-function dns_telemetry_set_do_zones%(enable:bool, config_fname:string, details_fname:string%): any
+function dns_telemetry_set_do_zones%(enable:bool%): any
 %{
 	do_zone_stats = enable;
-        __dns_telemetry_set_zones(config_fname->CheckString(), details_fname->CheckString());
+	return 0;
+%}
+
+function dns_telemetry_load_anchor_map%(config_fname:string, details_fname:string%): any
+%{
+	const char* config = config_fname->CheckString();
+	const char* details = details_fname->CheckString();
+ 	__dns_telemetry_load_anchor_map(config, details);
 	return 0;
 %}
 

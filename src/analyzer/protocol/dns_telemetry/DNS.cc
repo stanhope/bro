@@ -34,6 +34,8 @@
 #include <sparsehash/dense_hash_map>
 #include <sparsehash/sparse_hash_map>
 
+#include <pthread.h>
+
 using namespace analyzer::dns_telemetry;
 
 struct CurCounts {
@@ -157,13 +159,14 @@ PDict(QnameStats) telemetry_qname_stats;
 PDict(ZoneStats) telemetry_zone_stats;
 PDict(AnchorPoint) telemetry_anchor_map;
 
+// #define ROTATE_LOGGING 
 // #define UNORDERED_MAP 1
 // #define MURMOR_MAP 1
 // #define SUPERFAST_MAP 1
 // #define DENSE_HASH_MAP 1
 // #define SPARSE_HASH_MAP 1
-// #define FAST_HASH 1
-#define BRO_DICT 1
+#define FAST_HASH 1
+// #define BRO_DICT 1
 
 #define DEBUG_SAMPLING
 
@@ -200,34 +203,82 @@ GOOGLE_NAMESPACE::sparse_hash_map<string, AnchorPoint*> *anchor_map;
 GOOGLE_NAMESPACE::sparse_hash_map<string,AnchorPoint*>::const_iterator got;
 #endif
 
-// ----------------------------------------------------
-// ----------------------------------------------------
+bool do_counts = false;
+bool do_totals = false;
+bool do_zone_stats = true;
+bool do_owner_stats = true;
+bool do_qname_stats = true;
+bool do_anyrd_stats = true;
+bool do_client_stats = true;
+bool do_details = true;
+bool do_details_all = false;
+uint sample_rate = 1;
 
-class AsyncWriter : public threading::MsgThread {
-public:
-  AsyncWriter();
-  virtual ~AsyncWriter();
-  virtual bool OnHeartbeat(double network_time, double current_time);
-  virtual bool OnFinish(double network_time);
-protected:
+#define MAX_LOG_BUFFER 1024*1024
+
+// We support three types of detail logging
+//
+// ZONE_MANY - A commbination of zones. Presumably for an owner who operates mulitple zones and wants a aggregate log of activity.
+// ZONE_ONLY - A per zone detail only.
+// ZONE_ALL  - All (common log lines). How things are with 'traditional' DBIND.
+
+#define LOGGER_ZONE_NONE 0
+#define LOGGER_ZONE_MANY 1
+#define LOGGER_ZONE_ONLY 2
+#define LOGGER_ZONE_ALL  3
+
+struct DetailLogInfo {
+  double ts;
+  int owner_id;
+  int log_id;
+  int zone_id;
+  bool enabled;
+  PDict(int) zones;
+  char* fname;
+  BroFile* file;
+  FILE* raw_file;
+  uint buflen = 0;
+  uint bufcnt = 0;
+  char buffer[MAX_LOG_BUFFER];
 };
 
-AsyncWriter::AsyncWriter() {
-  SetName("AsyncWriter");
-}
+declare(PDict,DetailLogInfo);
+PDict(DetailLogInfo) DETAIL_LOGGER_INFO;
+char DETAIL_DEFAULT_PATH[256];
 
-AsyncWriter::~AsyncWriter() {
-}
+// Tracks open loggers. Important for the MultiZone (logid=2) scenario.
+PDict(DetailLogInfo) DETAIL_LOGGER_OPEN;
 
-bool AsyncWriter::OnHeartbeat(double network_time, double current_time) {
-  // COuld be used to flush @ a predictable heartbeat pace (~ once per second)
-  return 1;
-}
+// Allow per zone stats telemetry
+struct StatsLogInfo {
+  char* fname;
+  BroFile* file;
+  FILE* raw_file;
+  int owner_id;
+  bool enabled;
+  CurCounts CNTS;
+};
+declare(PDict,StatsLogInfo);
+PDict(StatsLogInfo) STATS_LOGGER_INFO;
 
-bool AsyncWriter::OnFinish(double network_time) {
-  fprintf(stderr, "AsyncWriter FINISH\n");
-  return 1;
-}
+// Allow per zone stats qname stats. Per Zone for Filter
+struct QnameFilter {
+  int owner_id;
+  int zone_id;
+  bool enabled;
+};
+declare(PDict,QnameFilter);
+PDict(QnameFilter) QNAME_FILTERS;
+
+struct QueryClient {
+  char addr[32];
+};
+
+declare(PDict,QueryClient);
+PDict(QueryClient) QUERY_CLIENTS;
+
+CurCounts CNTS;
+CurCounts TOTALS;
 
 // ----------------------------------------------------
 // ----------------------------------------------------
@@ -285,58 +336,6 @@ bool AnchorMapUpdater::OnFinish(double network_time) {
 }
 
 AnchorMapUpdater* ANCHOR_MAP_UPDATER = NULL;
-
-bool do_counts = false;
-bool do_totals = false;
-bool do_zone_stats = true;
-bool do_owner_stats = true;
-bool do_qname_stats = true;
-bool do_anyrd_stats = true;
-bool do_client_stats = true;
-bool do_details = true;
-uint sample_rate = 1;
-
-struct DetailLogInfo {
-  double ts;
-  int owner_id;
-  int log_id;
-  int zone_id;
-  bool enabled;
-  PDict(int) zones;
-  char* fname;
-  BroFile* file;
-};
-
-declare(PDict,DetailLogInfo);
-PDict(DetailLogInfo) DETAIL_LOGGER_INFO;
-char DETAIL_DEFAULT_PATH[256];
-
-// Tracks open loggers. Important for the MultiZone (logid=2) scenario.
-PDict(DetailLogInfo) DETAIL_LOGGER_OPEN;
-
-// Allow per zone stats telemetry
-struct StatsLogInfo {
-  char* fname;
-  BroFile* file;
-  int owner_id;
-  bool enabled;
-  CurCounts CNTS;
-};
-declare(PDict,StatsLogInfo);
-PDict(StatsLogInfo) STATS_LOGGER_INFO;
-
-// Allow per zone stats qname stats. Per Zone for Filter
-struct QnameFilter {
-  int owner_id;
-  int zone_id;
-  bool enabled;
-};
-declare(PDict,QnameFilter);
-PDict(QnameFilter) QNAME_FILTERS;
-
-
-CurCounts CNTS;
-CurCounts TOTALS;
 
 DNS_Telemetry_Interpreter::DNS_Telemetry_Interpreter(analyzer::Analyzer* arg_analyzer)
 	{
@@ -563,59 +562,10 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       zone_stats = telemetry_zone_stats.Lookup(other_hash);
       zone_hash = other_hash;
 
-      // Solely here for debugging of the sampling. Should not be present if ever released to production
-#ifdef DEBUG_SAMPLING
-      if (is_query) {
-	if (name[0] == 'r' && name[1] == '.') {
-	  uint rate = atoi((const char*)name+2);
-	  switch (rate) 
-	    {
-	    case 100:
-	      fprintf(stderr,"sampling @ 100%%\n");
-	      sample_rate = 1;
-	      break;
-	    case 2:
-	      fprintf(stderr,"sampling @ 50%%\n");
-	      sample_rate = rate;
-	      break;
-	    case 4:
-	      fprintf(stderr,"sampling @ 25%%\n");
-	      sample_rate = rate;
-	      break;
-	    case 8:
-	      fprintf(stderr,"sampling @ 12.5%%\n");
-	      sample_rate = rate;
-	      break;
-	    case 16:
-	      fprintf(stderr,"sampling @ 6.25%%\n");
-	      sample_rate = rate;
-	      break;
-	    case 32:
-	      fprintf(stderr,"sampling @ 3.125%%\n");
-	      sample_rate = rate;
-	      break;
-	    case 64:
-	      fprintf(stderr,"sampling @ 1.5625%%\n");
-	      sample_rate = rate;
-	      break;
-	    case 10:
-	      fprintf(stderr,"sampling @ 10%%\n");
-	      sample_rate = 10;
-	      break;
-	    case 20:
-	      fprintf(stderr,"sampling @ 5%%\n");
-	      sample_rate = 20;
-	      break;
-	    }
-	}
-      }
-#endif
-
     } else {
       zone_stats = telemetry_zone_stats.Lookup(zone_hash);
       do_zone_details = anchor_entry->details;
       owner_id = (bro_int_t)anchor_entry->owner_id;
-
       HashKey* stat_logger_key = new HashKey(owner_id);
       StatsLogInfo* stat_logger = STATS_LOGGER_INFO.Lookup(stat_logger_key);
       if (stat_logger) {
@@ -803,10 +753,36 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	
     const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
     string sAddr = orig_addr.AsString();
+    const char* sAddr_cstr = sAddr.c_str();
+
+    /*
+    const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
+    string sAddrResp = resp_addr.AsString();
+    const char* sAddrResp_cstr = sAddrResp.c_str();
+    fprintf(stderr, "QUERY|ORIG: %s RESP: %s id=%d\n", sAddr_cstr, sAddrResp_cstr, msg->id);
+    */
+
+    if (is_query) {
+      // Remember the client's IP. Use the message id as the temporary key. There is chance of a collision.
+      // Will eventually eat ~64K slots in this hash table.
+      HashKey* client_hash = new HashKey((uint32)msg->id);
+      QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
+      if (query_client) {
+	strcpy(query_client->addr, sAddr_cstr);
+      } else {
+	query_client = new QueryClient();
+	strcpy(query_client->addr, sAddr_cstr);
+	QUERY_CLIENTS.Insert(client_hash, query_client);
+      }
+      delete client_hash;
+    }
+
     if (is_query && do_client_stats) {
+
       char client_key[50];
-      strcpy(client_key, sAddr.c_str()); 
+      strcpy(client_key, sAddr.c_str());
       HashKey* client_hash = new HashKey(client_key);
+      // HashKey* client_hash = new HashKey(sAddr);
       int* client_idx = telemetry_client_stats.Lookup(client_hash);
       if (client_idx) {
 	++(*client_idx);
@@ -984,21 +960,31 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     // A REPLY. We don't do details until we've received the reply because of what we want to includes as part of that.
     dns_event = dns_telemetry_query_reply;
 
-    if (do_details && do_zone_details) {
+    if (do_details_all || (do_details && do_zone_details)) {
 
       ++CNTS.logged;
       ++TOTALS.logged;
       if (custom_stats)
 	++custom_stats->logged;
+      
 
-      const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
-      const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
+      string resp_addr = analyzer->Conn()->RespAddr().AsString();
+      const char* s_resp_addr = resp_addr.c_str();
+      const char* s_orig_addr = NULL;
+
+      HashKey* client_hash = new HashKey((uint32)msg->id);
+      QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
+      if (query_client) {
+	s_orig_addr = query_client->addr;
+      } else {
+	// This shouldn't happen.
+	s_orig_addr = "0";
+      }
+      delete client_hash;
 
       char log_line[256];
-      sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,"","",msg->opcode);
+      sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u\n", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,s_orig_addr,s_resp_addr,msg->opcode);
       uint len = strlen(log_line);
-      log_line[len++] = '\n';
-      log_line[len] = 0;
 
       // fprintf(stderr, "%s", log_line);
 
@@ -1006,28 +992,31 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       DetailLogInfo* logger = 0;
       if (anchor_entry != 0 && anchor_entry->log_id != 0) {
 
-	HashKey* log_key = new HashKey((bro_int_t)anchor_entry->zone_id);
-	logger = DETAIL_LOGGER_INFO.Lookup(log_key);
+	if (!do_details_all) {
+	  HashKey* log_key = new HashKey((bro_int_t)anchor_entry->zone_id);
+	  logger = DETAIL_LOGGER_INFO.Lookup(log_key);
+	  
+	  if (logger == 0) {
+	    fprintf(stderr, "WARN: Unexpected lack of DetailLogInfo config zone_id=%d owner_id=%d log_id=%d\n", anchor_entry->zone_id, anchor_entry->owner_id, anchor_entry->log_id);
+	    // Create new logger
+	    logger = new DetailLogInfo();
+	    logger->owner_id = anchor_entry->owner_id;
+	    logger->log_id = anchor_entry->log_id;
+	    logger->ts = network_time;
+	    logger->enabled = true;
+	    // Use the base multi-tenant logger's root
+	    logger->fname = DETAIL_DEFAULT_PATH;
+	    DETAIL_LOGGER_INFO.Insert(log_key, logger);
+	  }
+	  delete log_key;
 
-	if (logger == 0) {
-	  fprintf(stderr, "WARN: Unexpected lack of DetailLogInfo config zone_id=%d owner_id=%d log_id=%d\n", anchor_entry->zone_id, anchor_entry->owner_id, anchor_entry->log_id);
-	  // Create new logger
-	  logger = new DetailLogInfo();
-	  logger->owner_id = anchor_entry->owner_id;
-	  logger->log_id = anchor_entry->log_id;
-	  logger->ts = network_time;
-	  logger->enabled = true;
-	  // Use the base multi-tenant logger's root
-	  logger->fname = DETAIL_DEFAULT_PATH;
-	  DETAIL_LOGGER_INFO.Insert(log_key, logger);
+	  // Switch to using the common logger if that's what's configured
+	  if (logger->log_id == 3) {
+	    // fprintf(stderr, "using common logger\n");
+	    logger = NULL;
+	  }
 	}
-	delete log_key;
-
-	// Switch to using the common logger if that's what's configured
-	if (logger->log_id == 3) {
-	  logger = NULL;
-	}
-
+	  
 	if (logger == NULL) {
 	  // Default to multi-tenant logger
 	  HashKey* log_key = new HashKey((bro_int_t)0);
@@ -1043,19 +1032,19 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
 	  switch (logger->log_id) 
 	    {
-	    case 1:
+	    case LOGGER_ZONE_MANY:
 	      {
 		// Multi Zone
 		sprintf(source_fname, "%s-O-%08d.log", root_fname, logger->owner_id);
 		break;
 	      }
-	    case 2:
+	    case LOGGER_ZONE_ONLY:
 	      {
 		// Single Zone
 		sprintf(source_fname, "%s-Z-%08d.log", root_fname, logger->zone_id);
 		break;
 	      }
-	    case 3:
+	    case LOGGER_ZONE_ALL:
 	      {
 		// Common
 		sprintf(source_fname, "%s-00000000.log", root_fname);
@@ -1068,16 +1057,18 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	      }
 	    }
 
-	  if (logger->log_id == 1) {
+	  if (logger->log_id == LOGGER_ZONE_MANY) {
 	    // Determine if we've got an open logger for the source name. If so, use that.
 	    HashKey* open_logger_key = new HashKey(source_fname);
 	    DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
 	    if (open_logger) {
 	      // fprintf(stderr, "Using existing logger %s logid=%d owner=%d my_zone=%d other_zone=%d\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, open_logger->zone_id);
 	      logger->file = open_logger->file;
+	      logger->raw_file = open_logger->raw_file;
 	    } else {
 	      FILE* f = fopen(source_fname, "wb");
 	      logger->file = new BroFile(f, source_fname, "wb");
+	      logger->raw_file = f;
 	      DETAIL_LOGGER_OPEN.Insert(open_logger_key, logger);
 	      // fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
 	    }
@@ -1086,12 +1077,23 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  } else {
 	    FILE* f = fopen(source_fname, "wb");
 	    logger->file = new BroFile(f, source_fname, "wb");
-	    // fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
+	    logger->raw_file = f;
+#ifdef ROTATE_LOGGING
+	    fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
+#endif
 	  }
 	}
-	// fprintf(stderr, "...%p %s", logger->file, log_line);
-	logger->file->Write(log_line, len);
+
+	if (logger->buflen + len > MAX_LOG_BUFFER) {
+	  logger->file->Write(logger->buffer, logger->buflen);
+	  logger->buflen = 0;
+	  logger->bufcnt = 0;
+	}
+	memcpy(logger->buffer + logger->buflen, log_line, len);
+	logger->buflen += len;
+	++logger->bufcnt;
       }
+
     }
 
     if (local_do_counts) {
@@ -2097,13 +2099,13 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
     strcpy(DETAIL_DEFAULT_PATH, details_fname);
     common_logger->fname = DETAIL_DEFAULT_PATH;
     common_logger->owner_id = 0;
-    common_logger->enabled = false;
-    common_logger->log_id = 3;
+    common_logger->enabled = true;
+    common_logger->log_id = LOGGER_ZONE_ALL;
     if (common_logger->file != 0) {
       delete common_logger->file;
     }
     common_logger->file = NULL;
-    common_logger->log_id = 3;
+    common_logger->log_id = LOGGER_ZONE_ALL;
     common_logger->ts = network_time;
     DETAIL_LOGGER_INFO.Insert(key, common_logger);
   } else {
@@ -2222,7 +2224,7 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
       int stat_id = atoi(array[5]);
       int qname_id = atoi(array[6]);
 
-      if (log_id > 3) {
+      if (log_id > LOGGER_ZONE_ALL) {
 	fprintf(stderr, "ERROR: log_id must be either 0 (none), 1 (owner), 2 (zone) or 3 (common) logid=%d owner_id=%d zone_id=%d %s\n", log_id, owner_id, zone_id, name);
       }
 
@@ -2323,7 +2325,7 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
       logger = DETAIL_LOGGER_INFO.Lookup(logger_key);
       delete logger_key;
       
-      if (log_id == 0 && logger) {
+      if (log_id == LOGGER_ZONE_NONE && logger) {
 
 	// Update the logid. Could be toggling details on/off for a particular customer
 	// Owner ID can't / shouldn't change. Nor the location that we write these logs to.
@@ -2349,8 +2351,6 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
 	  logger->zone_id = anchor_entry->zone_id;
 	  logger->ts = network_time;
 	  logger->enabled = true;
-      
-	  // Use the base multi-tenant logger's root
 	  logger->fname = common_logger->fname;
 	  HashKey* log_key = new HashKey((bro_int_t)anchor_entry->zone_id);
 	  DETAIL_LOGGER_INFO.Insert(log_key, logger);
@@ -2644,8 +2644,6 @@ FILE* file_rotate(const char* name, const char* to_name)
   // return newf;
 }
 
-// #define ROTATE_LOGGING 
-
 void __dns_telemetry_fire_details(double ts, bool terminating) {
 
   // How we deal with synchronous, manual rotation.
@@ -2667,26 +2665,25 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
   while ((logger = DETAIL_LOGGER_INFO.NextEntry(key, cookie))) {
 
     char* root_fname = logger->fname;
-
     bool enabled = logger->enabled;
 
     switch  (logger->log_id) 
       {
-      case 1:
+      case LOGGER_ZONE_MANY:
 	{
 	  // Multi Zone
 	  sprintf(source_fname, "%s-O-%08d.log", root_fname, logger->owner_id);
 	  sprintf(rotate_fname, "%s-O-%08d-%s.log", root_fname, logger->owner_id, timestamp);
 	  break;
 	}
-      case 2:
+      case LOGGER_ZONE_ONLY:
 	{
 	  // Single Zone
 	  sprintf(source_fname, "%s-Z-%08d.log", root_fname, logger->zone_id);
 	  sprintf(rotate_fname, "%s-Z-%08d-%s.log", root_fname, logger->zone_id, timestamp);
 	  break;
 	}
-      case 3:
+      case LOGGER_ZONE_ALL:
 	{
 	  // Common
 	  sprintf(source_fname, "%s-00000000.log", root_fname);
@@ -2710,6 +2707,14 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
     if (logger->file != 0) {
 
       if (rotated_by == NULL) {
+	if (logger->buflen != 0) {
+#ifdef ROTATE_LOGGING
+	  fprintf(stderr, "  Flush pending writes len=%u cnt=%u\n", logger->buflen, logger->bufcnt);
+	  logger->file->Write(logger->buffer, logger->buflen);
+	  logger->buflen = 0;
+	  logger->bufcnt = 0;
+#endif
+	}
 	logger->file->Flush();
 	logger->file->Close();
 	if (strstr(source_fname, logger->file->Name())) {
@@ -2754,7 +2759,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 	logger->file = 0;
       }
 
-    } else if (logger->log_id == 3) {
+    } else if (logger->log_id == LOGGER_ZONE_ALL) {
 
       // No open file. Creating empty Common details. 
       // TODO: Consider tracking the number of active zones being common logged. If > 1 then create empty.
@@ -2771,7 +2776,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 #endif
       }
 
-    } else if (logger->log_id == 2) {
+    } else if (logger->log_id == LOGGER_ZONE_ONLY) {
 
       // Single Zone
 #ifdef ROTATE_LOGGING
@@ -2780,7 +2785,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
       FILE* f = fopen(rotate_fname, "wb");
       fclose(f);
     }
-    else if (logger->log_id == 1) {
+    else if (logger->log_id == LOGGER_ZONE_MANY) {
 
       // Multi-Zone -- we may have already rotated. No need to create if that's the case.
       if (rotated_by != NULL) {
@@ -2836,6 +2841,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 
     delete owner_key;
   }
+
   owners.Clear();
 }
 

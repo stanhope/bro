@@ -28,6 +28,8 @@ global do_zones=T;
 global do_owners=T;
 global do_qnames=F;
 global do_pcaps=F;
+global do_log_all=F;
+global sample_rate:count=1;
 
 const dns_ports = { 53/udp, 53/tcp };
 global valid_hostnames:set[addr] = {10.151.43.122, [::1], 172.16.200.69, 127.0.0.1};
@@ -46,6 +48,8 @@ type ConfigRecord: record {
     qnames: bool;
     pcaps: bool;
     clients: bool;
+    rate: count;
+    log_all: bool;
 };
 
 type ConfigIdx: record {
@@ -126,6 +130,8 @@ event config_change(description: Input::TableDescription, tpe: Input::Event, lef
 	do_owners = item$owners;
 	do_qnames = item$qnames;
 	do_pcaps = item$pcaps;
+	do_log_all = item$log_all;
+	sample_rate = item$rate;
         local cur_trace_file = pkt_dumper_file();
 	if (!do_pcaps) {
 	    if (cur_trace_file != "") {
@@ -149,7 +155,7 @@ global first_time_init:bool = T;
 
 event Input::end_of_data(name: string, source: string)
 {
-    print fmt("%f config loaded details=%d zones=%d owners=%d anyrd=%d clients=%d counts=%d", current_time(), do_details, do_zones, do_owners, do_anyrd, do_clients, do_counts);
+    print fmt("%f config loaded details=%d zones=%d owners=%d anyrd=%d clients=%d counts=%d rate=%0.5f", current_time(), do_details, do_zones, do_owners, do_anyrd, do_clients, do_counts, 1.0/sample_rate);
     dns_telemetry_set_do_details(do_details);
     dns_telemetry_set_do_zones(do_zones);
     if (first_time_init) {
@@ -161,9 +167,10 @@ event Input::end_of_data(name: string, source: string)
     dns_telemetry_set_do_clients(do_clients);
     dns_telemetry_set_do_counts(do_counts);
     dns_telemetry_set_do_totals(T);
-    dns_telemetry_set_sample_rate(1);
+    dns_telemetry_set_sample_rate(sample_rate);
+    dns_telemetry_set_do_log_all(do_log_all);
     
-    if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts)
+    if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts || do_log_all)
         local delta:double = init_manual_rotate(current_time());
     local now:double = time_to_double(current_time());
     if (first_time_init) {
@@ -206,7 +213,7 @@ global header_emit:bool = F;
 event dns_telemetry_count(info:dns_telemetry_counts) {
     if (!header_emit) {
 	print "";
-	print "ts network_time lag - request,reply,rejected,logged,MBsec,MBin,MBout,MBsec";
+	print "ts network_time lag - request,reply,rejected,logged,MBsec,MBin,MBout,MBsec,rate";
 	header_emit = T;
     }
     if (info$owner == 0) {

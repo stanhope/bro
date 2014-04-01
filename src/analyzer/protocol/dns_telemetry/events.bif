@@ -146,6 +146,7 @@ extern bool do_client_stats;
 extern bool do_counts;
 extern bool do_totals;
 extern bool do_details;
+extern bool do_details_all;
 extern bool do_samples;
 extern uint sample_rate;
 
@@ -320,5 +321,16 @@ function dns_telemetry_set_do_clients%(enable:bool%): any
 %{
 	do_client_stats = enable;
 	return 0;
+%}
+
+function dns_telemetry_set_do_log_all%(enable:bool%): any
+%{
+	do_details_all = enable;
+	return 0;
+%}
+
+function dns_telemetry_get_do_log_all%(enable:bool%): any
+%{
+	return new Val(do_details_all, TYPE_BOOL);
 %}
 

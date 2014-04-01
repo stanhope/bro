@@ -9,7 +9,7 @@
 #include <math.h>
 #include "fast_hash_common.h"
 
-inline int memcmp_fast(const void *a, const void *b, uint32_t len) {
+inline int memcmp_fast(const char *a, const char *b, uint32_t len) {
 	uint32_t chunks, remainder;
 	if (len >= 8) {
 		chunks    = len / 8;
@@ -112,7 +112,7 @@ fixed_len_hash_lookup(struct fixed_len_hash* self, const char *key)
 	char *record = _fixed_len_hash_addr(self, key);
 	do {
 	  if (memcmp_fast(record, key, self->key_len) == 0) 
-	    return (void*)record + self->key_len;
+	    return (void*)(record + self->key_len);
 	  record += self->rec_len;
 	} while (*record != 0);
 	return NULL;

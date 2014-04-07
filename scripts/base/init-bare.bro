@@ -3233,6 +3233,30 @@ type dns_telemetry_counts: record {
  MBout: double &log;
  MBsec: double &log;
  rate: double &log;
+
+ T2R_min: count &log;
+ T2R_max: count &log;
+ T2R_avg: count &log;
+
+ NX_T2R_min: count &log;
+ NX_T2R_max: count &log;
+ NX_T2R_avg: count &log;
+
+ A_T2R_min: count &log;
+ A_T2R_max: count &log;
+ A_T2R_avg: count &log;
+
+ ANY_T2R_min: count &log;
+ ANY_T2R_max: count &log;
+ ANY_T2R_avg: count &log;
+
+ CNAME_T2R_min: count &log;
+ CNAME_T2R_max: count &log;
+ CNAME_T2R_avg: count &log;
+
+ PTR_T2R_min: count &log;
+ PTR_T2R_max: count &log;
+ PTR_T2R_avg: count &log;
 };
 
 type dns_telemetry_anyrd_stats: record {

@@ -82,6 +82,27 @@ struct CurCounts {
   uint clients;
   uint zones;
   uint MBsec;
+  uint T2R_min;
+  uint T2R_max;
+  uint T2R_avg;
+  uint NX_T2R_min;
+  uint NX_T2R_max;
+  uint NX_T2R_avg;
+  uint A_T2R_min;
+  uint A_T2R_max;
+  uint A_T2R_avg;
+  uint ANY_T2R_min;
+  uint ANY_T2R_max;
+  uint ANY_T2R_avg;
+  uint CNAME_T2R_min;
+  uint CNAME_T2R_max;
+  uint CNAME_T2R_avg;
+  uint PTR_T2R_min;
+  uint PTR_T2R_max;
+  uint PTR_T2R_avg;
+  uint AAAA_T2R_min;
+  uint AAAA_T2R_max;
+  uint AAAA_T2R_avg;
 };
 
 struct AnyRDCounts {
@@ -271,7 +292,9 @@ declare(PDict,QnameFilter);
 PDict(QnameFilter) QNAME_FILTERS;
 
 struct QueryClient {
-  char addr[32];
+  double start;
+  uint32 atype;
+  uint32 qtype;
 };
 
 declare(PDict,QueryClient);
@@ -357,6 +380,8 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 	qlen = 0;
 	rlen = 0;
 
+	// fprintf(stderr, "Message %f\n", network_time);
+
 	if (do_counts) {
 	  if (is_query) {
 	    CNTS.qlen += len;
@@ -369,6 +394,7 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 	  }
 	}
 
+	/*
 	if ( dns_telemetry_message )
 		{
 		val_list* vl = new val_list();
@@ -378,6 +404,7 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 		vl->append(new Val(len, TYPE_COUNT));
 		analyzer->ConnectionEvent(dns_telemetry_message, vl);
 		}
+	*/
 
 	// There is a great deal of non-DNS traffic that runs on port 53.
 	// This should weed out most of it.
@@ -482,6 +509,7 @@ int DNS_Telemetry_Interpreter::ParseQuestions(DNS_Telemetry_MsgInfo* msg,
 			msg->rcode == DNS_CODE_OK ?
 				dns_telemetry_query_reply : dns_telemetry_rejected;
 		BroString* question_name = new BroString("<no query>");
+		fprintf(stderr, "..REFUSED handling needed\n");
 		SendReplyOrRejectEvent(msg, dns_event, data, len, question_name);
 		return 1;
 		}
@@ -518,6 +546,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   AnchorPoint* anchor_entry = 0;
   u_char* name_end = ExtractName(data, len, name, name_len, msg_start, tlz, (void**)&anchor_entry);
 
+
   if ( ! name_end )
     return 0;
 
@@ -526,6 +555,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       analyzer->Weird("DNS_truncated_quest_too_short");
       return 0;
     }
+
+  // fprintf(stderr, "..ParseQuestion qname=%s len=%d tlz=%s anchor=%p query=%d rcode=%d id=%d\n", name, len, tlz, anchor_entry, is_query, msg->rcode, msg->id);
 
   bool local_do_counts = do_counts;
   bool local_do_zone_stats = do_zone_stats;
@@ -557,7 +588,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     if (!anchor_entry) {
       // Get rid of the zoneid based specific hash and use the OTHER zone hash
       delete zone_hash;
-      const char other[] = "OTHER";
+      const char other[] = "?";
       HashKey* other_hash = new HashKey(other);
       zone_stats = telemetry_zone_stats.Lookup(other_hash);
       zone_hash = other_hash;
@@ -698,7 +729,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       zone_stats->owner_id = anchor_entry->owner_id;
     } else {
       // OTHER bucket for now
-      strcpy(zone_stats->key, "OTHER");
+      strcpy(zone_stats->key, "?");
       zone_stats->zone_id = 0;
       zone_stats->owner_id = 0;
     }
@@ -742,8 +773,6 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     RR_Type qtype = RR_Type(ExtractShort(data, len));
     msg->qtype = qtype;
     
-    // fprintf(stderr, "query|do_cnts=%d do_stats=%d is_query=%d sample_rate=%d qtype=%d\n", local_do_counts, is_query, sample_rate, qtype);
-
     if (local_do_zone_stats) {
       ++zone_stats->cnt;
       if (msg->RD) {
@@ -755,23 +784,24 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     string sAddr = orig_addr.AsString();
     const char* sAddr_cstr = sAddr.c_str();
 
-    /*
     const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
     string sAddrResp = resp_addr.AsString();
     const char* sAddrResp_cstr = sAddrResp.c_str();
-    fprintf(stderr, "QUERY|ORIG: %s RESP: %s id=%d\n", sAddr_cstr, sAddrResp_cstr, msg->id);
-    */
+
+    // fprintf(stderr, "QUERY|ORIG: %s RESP: %s id=%d qtype=%u %f\n", sAddr_cstr, sAddrResp_cstr, msg->id, msg->qtype, network_time);
 
     if (is_query) {
-      // Remember the client's IP. Use the message id as the temporary key. There is chance of a collision.
-      // Will eventually eat ~64K slots in this hash table.
+      // Remember the client's IP. Use the message transaction id as the temporary key. 
+      // There is chance of a small/probablistic chance of collision. See BRO transaction id comments in their source code.
       HashKey* client_hash = new HashKey((uint32)msg->id);
       QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
       if (query_client) {
-	strcpy(query_client->addr, sAddr_cstr);
+	query_client->start = network_time;
+	query_client->qtype = msg->qtype;
       } else {
 	query_client = new QueryClient();
-	strcpy(query_client->addr, sAddr_cstr);
+	query_client->start = network_time;
+	query_client->qtype = msg->qtype;
 	QUERY_CLIENTS.Insert(client_hash, query_client);
       }
       delete client_hash;
@@ -779,10 +809,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
     if (is_query && do_client_stats) {
 
-      char client_key[50];
-      strcpy(client_key, sAddr.c_str());
-      HashKey* client_hash = new HashKey(client_key);
-      // HashKey* client_hash = new HashKey(sAddr);
+      HashKey* client_hash = new HashKey(sAddr_cstr);
       int* client_idx = telemetry_client_stats.Lookup(client_hash);
       if (client_idx) {
 	++(*client_idx);
@@ -803,6 +830,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       switch (qtype) 
 	{
 	case TYPE_A:
+	  // fprintf(stderr, "QUERY|qtype=%u %f\n", qtype, network_time);
 	  ++CNTS.A;
 	  ++TOTALS.A;
 	  if (custom_stats) 
@@ -939,7 +967,6 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   else if ( msg->QR == 1 &&  msg->ancount == 0 && msg->nscount == 0 && msg->arcount == 0 ) {
     // Service rejected in some fashion, and it won't be reported
     // via a returned RR because there aren't any.
-    // fprintf(stderr, "reply| no answers\n");
     dns_event = dns_telemetry_rejected;
     if (local_do_counts) {
       ++CNTS.rejected;
@@ -951,14 +978,129 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	++custom_stats->rcode_refused;
       }
     }
+
+    string resp_addr = analyzer->Conn()->RespAddr().AsString();
+    const char* s_resp_addr = resp_addr.c_str();
+
+    HashKey* client_hash = new HashKey((uint32)msg->id);
+    QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
+    double start_time = 0;
+    uint orig_qtype = 0;
+    if (query_client) {
+      start_time = query_client->start;
+      orig_qtype = query_client->qtype;
+      // TODO: Delete? Do we care. If we overlap on a 32bit int we're just eating memory
+    }
+    delete client_hash;
+    uint t2r = (network_time - start_time)*1000000; // As unsigned micro seconds!
+
+    CNTS.T2R_min = CNTS.T2R_min == 0 ? t2r : min(CNTS.T2R_min, t2r);
+    CNTS.T2R_max = max(CNTS.T2R_max, t2r);
+    CNTS.T2R_avg += t2r;
+
+    fprintf(stderr, "..ORIG qtype=%u A T2R %f\n", orig_qtype, network_time);
+
+    switch (orig_qtype) {
+    case TYPE_A:
+    case TYPE_AAAA:
+      {
+	CNTS.A_T2R_min = CNTS.A_T2R_min == 0 ? t2r : min(CNTS.A_T2R_min, t2r);
+	CNTS.A_T2R_max = max(CNTS.A_T2R_max, t2r);
+	CNTS.A_T2R_avg += t2r;
+	break;
+      }
+    case TYPE_CNAME:
+      {
+	CNTS.CNAME_T2R_min = CNTS.CNAME_T2R_min == 0 ? t2r : min(CNTS.CNAME_T2R_min, t2r);
+	CNTS.CNAME_T2R_max = max(CNTS.CNAME_T2R_max, t2r);
+	CNTS.CNAME_T2R_avg += t2r;
+	break;
+      }
+    case TYPE_ALL:
+      {
+	CNTS.ANY_T2R_min = CNTS.ANY_T2R_min == 0 ? t2r : min(CNTS.ANY_T2R_min, t2r);
+	CNTS.ANY_T2R_max = max(CNTS.ANY_T2R_max, t2r);
+	CNTS.ANY_T2R_avg += t2r;
+	break;
+      }
+    case TYPE_PTR:
+      {
+	CNTS.PTR_T2R_min = CNTS.PTR_T2R_min == 0 ? t2r : min(CNTS.PTR_T2R_min, t2r);
+	CNTS.PTR_T2R_max = max(CNTS.PTR_T2R_max, t2r);
+	CNTS.PTR_T2R_avg += t2r;
+	break;
+      }
+    default:
+      {
+	break;
+      }
+    }
     if (local_do_zone_stats)
       ++zone_stats->REFUSED;
   } else {
 
-    // fprintf(stderr, "reply| with answers details=%d zone=%d\n", do_details, do_zone_details);
-
     // A REPLY. We don't do details until we've received the reply because of what we want to includes as part of that.
     dns_event = dns_telemetry_query_reply;
+
+    HashKey* client_hash = new HashKey((uint32)msg->id);
+    QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
+    double start_time = 0;
+    uint orig_qtype = 0;
+    if (query_client) {
+      start_time = query_client->start;
+      orig_qtype = query_client->qtype;
+      // TODO: Delete? Do we care. If we overlap on a 32bit int we're just eating memory
+    }
+    delete client_hash;
+    uint t2r = (network_time - start_time)*1000000; // As unsigned micro seconds!
+    
+    CNTS.T2R_min = CNTS.T2R_min == 0 ? t2r : min(CNTS.T2R_min, t2r);
+    CNTS.T2R_max = max(CNTS.T2R_max, t2r);
+    CNTS.T2R_avg += t2r;
+    
+    if (msg->rcode == DNS_CODE_NAME_ERR) {
+      CNTS.NX_T2R_min = CNTS.NX_T2R_min == 0 ? t2r : min(CNTS.NX_T2R_min, t2r);
+      CNTS.NX_T2R_max = max(CNTS.NX_T2R_max, t2r);
+      CNTS.NX_T2R_avg += t2r;
+    }
+
+    // fprintf(stderr, "..ORIG qtype=%u A T2R %f\n", orig_qtype, network_time);
+
+    switch (orig_qtype) {
+    case TYPE_A:
+    case TYPE_AAAA:
+      {
+	CNTS.A_T2R_min = CNTS.A_T2R_min == 0 ? t2r : min(CNTS.A_T2R_min, t2r);
+	CNTS.A_T2R_max = max(CNTS.A_T2R_max, t2r);
+	CNTS.A_T2R_avg += t2r;
+	break;
+      }
+    case TYPE_CNAME:
+      {
+	CNTS.CNAME_T2R_min = CNTS.CNAME_T2R_min == 0 ? t2r : min(CNTS.CNAME_T2R_min, t2r);
+	CNTS.CNAME_T2R_max = max(CNTS.CNAME_T2R_max, t2r);
+	CNTS.CNAME_T2R_avg += t2r;
+	break;
+      }
+    case TYPE_ALL:
+      {
+	CNTS.ANY_T2R_min = CNTS.ANY_T2R_min == 0 ? t2r : min(CNTS.ANY_T2R_min, t2r);
+	CNTS.ANY_T2R_max = max(CNTS.ANY_T2R_max, t2r);
+	CNTS.ANY_T2R_avg += t2r;
+	break;
+      }
+    case TYPE_PTR:
+      {
+	CNTS.PTR_T2R_min = CNTS.PTR_T2R_min == 0 ? t2r : min(CNTS.PTR_T2R_min, t2r);
+	CNTS.PTR_T2R_max = max(CNTS.PTR_T2R_max, t2r);
+	CNTS.PTR_T2R_avg += t2r;
+	break;
+      }
+    default:
+      {
+	break;
+      }
+    }
 
     if (do_details_all || (do_details && do_zone_details)) {
 
@@ -967,23 +1109,15 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       if (custom_stats)
 	++custom_stats->logged;
       
-
       string resp_addr = analyzer->Conn()->RespAddr().AsString();
       const char* s_resp_addr = resp_addr.c_str();
-      const char* s_orig_addr = NULL;
 
-      HashKey* client_hash = new HashKey((uint32)msg->id);
-      QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
-      if (query_client) {
-	s_orig_addr = query_client->addr;
-      } else {
-	// This shouldn't happen.
-	s_orig_addr = "0";
-      }
-      delete client_hash;
+      string orig_addr = analyzer->Conn()->OrigAddr().AsString();
+      const char* s_orig_addr = orig_addr.c_str();
+      // fprintf(stderr, "REPLY|ORIG: %s RESP: %s id=%d qtype=%u rcode=%u %f %f t2r=%u\n", s_orig_addr, s_resp_addr, msg->id, orig_qtype, msg->rcode, network_time, start_time, t2r);
 
       char log_line[256];
-      sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u\n", network_time,(char*)name,msg->qtype,msg->rcode,msg->ttl,s_orig_addr,s_resp_addr,msg->opcode);
+      sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u\n", network_time,(char*)name,orig_qtype,msg->rcode,msg->ttl,s_orig_addr,s_resp_addr,msg->opcode);
       uint len = strlen(log_line);
 
       // fprintf(stderr, "%s", log_line);
@@ -1093,10 +1227,10 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	logger->buflen += len;
 	++logger->bufcnt;
       }
-
     }
 
     if (local_do_counts) {
+
       switch (msg->rcode) 
 	{
 	case DNS_CODE_OK: {
@@ -1140,10 +1274,14 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	    ++custom_stats->rcode_not_impl;
 	  break;
 	case DNS_CODE_REFUSED:
+	  ++CNTS.rejected;
 	  ++CNTS.rcode_refused;
 	  ++TOTALS.rcode_refused;
-	  if (custom_stats) 
+	  ++TOTALS.rejected;
+	  if (custom_stats) {
 	    ++custom_stats->rcode_refused;
+	    ++custom_stats->rejected;
+	  }
 	  if (do_zone_stats)
 	    ++zone_stats->REFUSED;
 	  break;
@@ -1308,7 +1446,7 @@ u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
       while(pSearch && ++pSearch < pDelim);
     }
     if (!match) {
-      strcpy(tlz, "OTHER");
+      strcpy(tlz, "?");
     }
     // fprintf(stderr, "::ExtractName qname=%s len=%d tlz=%s %p %p\n", name_start, n, tlz, pzinfo, pzinfo ? *pzinfo : 0);
   }
@@ -2402,26 +2540,25 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
   return 1;
 }
 
-val_list* buildCountsRecord(CurCounts* cnts, uint owner_id, double ts, double lag, uint rate, bool is_totals) {
+val_list* buildCountsRecord(CurCounts* cnts, uint owner_id, double ts, double lag, uint _rate, bool is_totals) {
   val_list* vl = new val_list;
   RecordVal* r = new RecordVal(dns_telemetry_counts);
 
   // fprintf(stderr, "..building Counts Record ts=%f lag=%f rate=%u owner_id=%u %p\n", ts, lag, rate, owner_id, cnts);
 
+  uint rate = _rate;
+  if ((_rate != 1 && is_totals) || cnts->request < rate)
+    rate = 1;
+
   r->Assign(0, new Val(ts, TYPE_DOUBLE));
   r->Assign(1, new Val(lag, TYPE_DOUBLE));
   r->Assign(2, new Val(owner_id, TYPE_COUNT));
-  if (is_totals && rate != 1) {
-    r->Assign(3, new Val(cnts->request, TYPE_COUNT));
-    r->Assign(4, new Val(cnts->rejected, TYPE_COUNT));
-    r->Assign(5, new Val(cnts->reply, TYPE_COUNT));
-    r->Assign(6, new Val(cnts->non_dns_request, TYPE_COUNT));
-  } else {
-    r->Assign(3, new Val(cnts->request*rate, TYPE_COUNT));
-    r->Assign(4, new Val(cnts->rejected*rate, TYPE_COUNT));
-    r->Assign(5, new Val(cnts->reply*rate, TYPE_COUNT));
-    r->Assign(6, new Val(cnts->non_dns_request*rate, TYPE_COUNT));
-  }
+
+  r->Assign(3, new Val(cnts->request*rate, TYPE_COUNT));
+  r->Assign(4, new Val(cnts->rejected*rate, TYPE_COUNT));
+  r->Assign(5, new Val(cnts->reply*rate, TYPE_COUNT));
+  r->Assign(6, new Val(cnts->non_dns_request*rate, TYPE_COUNT));
+
   r->Assign(7, new Val(cnts->ANY_RD*rate, TYPE_COUNT));
   r->Assign(8, new Val(cnts->ANY*rate, TYPE_COUNT));
   r->Assign(9, new Val(cnts->A*rate, TYPE_COUNT));
@@ -2482,7 +2619,66 @@ val_list* buildCountsRecord(CurCounts* cnts, uint owner_id, double ts, double la
   // TOTAL in/out MB/s
   r->Assign(47, new Val((cnts->qlen+cnts->rlen)*rate/1048576.0, TYPE_DOUBLE));
 
+  // Sampling Rate
   r->Assign(48, new Val(1.0/rate, TYPE_DOUBLE));
+
+  // T2OP (Time 2 Outbound Packet - aka Response as observed at the server)
+#define T2R_READY
+#ifdef T2R_READY
+  r->Assign(49, new Val(cnts->T2R_min, TYPE_COUNT));
+  r->Assign(50, new Val(cnts->T2R_max, TYPE_COUNT));
+  uint avg = (cnts->T2R_avg != 0 && cnts->request != 0) ? cnts->T2R_avg / cnts->request : 0;
+  r->Assign(51, new Val(avg, TYPE_COUNT));
+
+  r->Assign(52, new Val(cnts->NX_T2R_min, TYPE_COUNT));
+  r->Assign(53, new Val(cnts->NX_T2R_max, TYPE_COUNT));
+  avg = (cnts->NX_T2R_avg != 0 && cnts->request != 0) ? cnts->NX_T2R_avg / cnts->request : 0;
+  r->Assign(54, new Val(avg, TYPE_COUNT));
+
+  r->Assign(55, new Val(cnts->A_T2R_min, TYPE_COUNT));
+  r->Assign(56, new Val(cnts->A_T2R_max, TYPE_COUNT));
+  avg = (cnts->A_T2R_avg != 0 && cnts->request != 0) ? cnts->A_T2R_avg / cnts->request : 0;
+  r->Assign(57, new Val(avg, TYPE_COUNT));
+
+  r->Assign(58, new Val(cnts->ANY_T2R_min, TYPE_COUNT));
+  r->Assign(59, new Val(cnts->ANY_T2R_max, TYPE_COUNT));
+  avg = (cnts->ANY_T2R_avg != 0 && cnts->request != 0) ? cnts->ANY_T2R_avg / cnts->request : 0;
+  r->Assign(60, new Val(avg, TYPE_COUNT));
+
+  r->Assign(61, new Val(cnts->CNAME_T2R_min, TYPE_COUNT));
+  r->Assign(62, new Val(cnts->CNAME_T2R_max, TYPE_COUNT));
+  avg = (cnts->CNAME_T2R_avg != 0 && cnts->request != 0) ? cnts->CNAME_T2R_avg / cnts->request : 0;
+  r->Assign(63, new Val(avg, TYPE_COUNT));
+
+  r->Assign(64, new Val(cnts->PTR_T2R_min, TYPE_COUNT));
+  r->Assign(65, new Val(cnts->PTR_T2R_max, TYPE_COUNT));
+  avg = (cnts->PTR_T2R_avg != 0 && cnts->request != 0) ? cnts->PTR_T2R_avg / cnts->request : 0;
+  r->Assign(66, new Val(avg, TYPE_COUNT));
+
+#else
+  r->Assign(49, new Val(0, TYPE_COUNT));
+  r->Assign(50, new Val(0, TYPE_COUNT));
+  r->Assign(51, new Val(0, TYPE_COUNT));
+
+  r->Assign(52, new Val(0, TYPE_COUNT));
+  r->Assign(53, new Val(cnts->NX_T2R_max, TYPE_COUNT));
+  r->Assign(54, new Val(0, TYPE_COUNT));
+
+  r->Assign(55, new Val(0, TYPE_COUNT));
+  r->Assign(56, new Val(0, TYPE_COUNT));
+  r->Assign(57, new Val(0, TYPE_COUNT));
+
+  r->Assign(58, new Val(0, TYPE_COUNT));
+  r->Assign(59, new Val(0, TYPE_COUNT));
+  r->Assign(60, new Val(0, TYPE_COUNT));
+
+  r->Assign(61, new Val(0, TYPE_COUNT));
+  r->Assign(62, new Val(0, TYPE_COUNT));
+  r->Assign(63, new Val(0, TYPE_COUNT));
+
+#endif
+
+  // fprintf(stderr,"reqs=%u reply=%u A=%u clients=%u ", cnts->request, cnts->reply, cnts->A, cnts->clients);
 
   vl->append(r);
   return vl;

@@ -213,11 +213,12 @@ global header_emit:bool = F;
 event dns_telemetry_count(info:dns_telemetry_counts) {
     if (!header_emit) {
 	print "";
-	print "ts network_time lag - request,reply,rejected,logged,MBsec,MBin,MBout,MBsec,rate";
+	print "ts network_time lag - request,reply,rejected,logged,MBsec,MBin,MBout,MBsec,rate,T2R_min,T2R_max,T2R_avg,A_T2R_min,A_T2R_max,A_T2R_avg,NX_T2R_min,NX_T2R_max,NX_T2R_avg,CNAME_T2R_min,CNAME_T2R_max,CNAME_T2R_avg,ANY_T2R_min,ANY_T2R_max,ANY_T2R_avg,PTR_T2R_min,PTR_T2R_max,PTR_T2R_avg";
 	header_emit = T;
     }
     if (info$owner == 0) {
-      print fmt("%f %s %f - %d,%d,%d,%d,%05.2f,%05.2f,%05.2f,%0.2f",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$logged,info$MBin,info$MBout,info$MBsec,info$rate);
+#      print fmt("%s", info);
+      print fmt("%f %s %f - %d,%d,%d,%d,%05.2f,%05.2f,%05.2f,%0.2f, %d,%d,%d, %d,%d,%d, %d,%d,%d, %d,%d,%d, %d,%d,%d, %d,%d,%d",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$logged,info$MBin,info$MBout,info$MBsec,info$rate,info$T2R_min,info$T2R_max,info$T2R_avg, info$A_T2R_min, info$A_T2R_max, info$A_T2R_avg,info$NX_T2R_min, info$NX_T2R_max, info$NX_T2R_avg,info$CNAME_T2R_min, info$CNAME_T2R_max, info$CNAME_T2R_avg,info$ANY_T2R_min, info$ANY_T2R_max, info$ANY_T2R_avg, info$PTR_T2R_min, info$PTR_T2R_max, info$PTR_T2R_avg);
       Log::write_at(info$ts, DBIND9::COUNTS, info);
     } else if (info$owner == 1) {
 #       print fmt("custom_stat %s", info);

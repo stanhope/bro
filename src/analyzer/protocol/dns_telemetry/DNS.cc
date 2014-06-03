@@ -36,6 +36,44 @@
 
 #include <pthread.h>
 
+#include "sys/sysinfo.h"
+#include "sys/times.h"
+#include "sys/vtimes.h"
+#include "statsd-client.c"
+
+static const char* MY_NODE_ID = "mht1";
+static const char* MY_STATSD_IFACE = "p1p1";
+char MY_MAC_ADDR[16];
+char STATSD_LINK_NAME[32];
+statsd_link *STATSD_LINK;
+#define MAX_LINE_LEN 200
+#define PKT_LEN 1400
+
+int find_my_mac(const char *iface, char *mac)
+{
+  struct ifreq ifr;
+  memset(&ifr, 0, sizeof(struct ifreq));
+  strncpy(ifr.ifr_name, iface, IFNAMSIZ);
+  int s = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+  if (s == -1) {
+    perror("socket");
+    return -1;
+  }
+
+  if ( ioctl(s, SIOCGIFHWADDR, &ifr) == -1 ) {
+    perror("ioctl(SIOCGIFHWADDR)");
+    close(s);
+    return -1;
+  }
+  unsigned char macaddr[6];
+  memcpy(macaddr, ifr.ifr_hwaddr.sa_data, 6);
+  sprintf(mac, "%.2X%.2X%.2X%.2X%.2X%.2X",
+	  macaddr[0], macaddr[1], macaddr[2],
+	  macaddr[3], macaddr[4], macaddr[5]);
+  close(s);
+  return 0;
+}
+
 using namespace analyzer::dns_telemetry;
 
 struct CurCounts {
@@ -319,18 +357,68 @@ protected:
   char fname[512];
 };
 
+
+int parseLine(char* line){
+  int i = strlen(line);
+  while (*line < '0' || *line > '9') line++;
+  line[i-3] = '\0';
+  i = atoi(line);
+  return i;
+}
+    
+
+static int getValues(int* VIRT, int* RES, int* DATA, int* FD){
+  //Note: this value is in KB!
+  FILE* file = fopen("/proc/self/status", "r");
+  int result = -1;
+  char line[128];
+    
+
+  while (fgets(line, 128, file) != NULL) {
+    if (strncmp(line, "VmSize:", 7) == 0){
+      *VIRT = parseLine(line);
+    }
+    else if (strncmp(line, "VmRSS:", 6) == 0){
+      *RES = parseLine(line);
+    }
+    else if (strncmp(line, "VmData:", 7) == 0){
+      *DATA = parseLine(line);
+    }
+    else if (strncmp(line, "FDSize:", 7) == 0){
+      *FD = parseLine(line);
+    }
+  }
+  fclose(file);
+  return result;
+}
+
+
 AnchorMapUpdater::AnchorMapUpdater(char* _fname, double _interval) {
+  double now = current_time();
+
   SetName("ZoneUpdater");
   interval = _interval;
   strcpy(fname, _fname);
-  next = current_time() + interval;
+  next = now + interval;
   struct stat buf;
   stat(fname, &buf);
   int size = buf.st_size;
   last = buf.st_mtime;
+
+  if (find_my_mac(MY_STATSD_IFACE, MY_MAC_ADDR) == 0) {
+    fprintf(stderr, "%f statsd_init NODE=%s IFACE=%s MAC_ADDR=%s\n", now, MY_NODE_ID, MY_STATSD_IFACE, MY_MAC_ADDR);
+    snprintf(STATSD_LINK_NAME, sizeof(STATSD_LINK_NAME), "host.%s.%s", MY_NODE_ID, MY_MAC_ADDR);
+    STATSD_LINK = statsd_init_with_namespace("127.0.0.1", 8125, STATSD_LINK_NAME);
+  } else {
+    fprintf(stderr, "%f statsd_init Invalid statsd config IFACE => %s EXITING\n", now, MY_STATSD_IFACE);
+    exit(1);
+  }
+
 }
 
 AnchorMapUpdater::~AnchorMapUpdater() {
+  fprintf(stderr, "%f AnchorMapUpdater::dtor\n", current_time());
+  statsd_finalize(STATSD_LINK);
 }
 
 int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname);
@@ -998,7 +1086,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     CNTS.T2R_max = max(CNTS.T2R_max, t2r);
     CNTS.T2R_avg += t2r;
 
-    fprintf(stderr, "..ORIG qtype=%u A T2R %f\n", orig_qtype, network_time);
+    // fprintf(stderr, "..ORIG qtype=%u A T2R %f\n", orig_qtype, network_time);
 
     switch (orig_qtype) {
     case TYPE_A:
@@ -2684,6 +2772,10 @@ val_list* buildCountsRecord(CurCounts* cnts, uint owner_id, double ts, double la
   return vl;
 }
 
+
+static double last_utime = 0, last_stime = 0;
+static long last_signals = 0, last_majflt = 0, last_minflt = 0, last_inblock = 0, last_oublock = 0, last_nswap = 0;
+
 void __dns_telemetry_fire_counts(double ts) {
   if ( dns_telemetry_count ) {
     double lag = current_time() - ts;
@@ -2691,7 +2783,123 @@ void __dns_telemetry_fire_counts(double ts) {
     if (lag > 2) {
       fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
     }
-    mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
+
+    char pkt[PKT_LEN];
+    char tmp[MAX_LINE_LEN];
+    pkt[0]=0;
+
+    int self_VIRT = 0, self_RES = 0, self_DATA = 0, self_FD = 0;
+    getValues(&self_VIRT, &self_RES, &self_DATA, &self_FD);
+
+    struct rusage self_usage;
+    getrusage(RUSAGE_SELF, &self_usage);
+    double utime = self_usage.ru_utime.tv_sec + self_usage.ru_utime.tv_usec/1000000.0;
+    double stime = self_usage.ru_stime.tv_sec + self_usage.ru_stime.tv_usec/1000000.0;
+
+    // Calc delta since last interval for key per process metrics
+    double delta_utime = utime - last_utime;
+    double delta_stime = stime - last_stime;
+    double total_time = delta_utime + delta_stime;
+    long delta_nsignals = self_usage.ru_nsignals - last_signals;
+    long delta_inblock = self_usage.ru_inblock - last_inblock;
+    long delta_oublock = self_usage.ru_oublock - last_oublock;
+    long delta_nswap = self_usage.ru_nswap - last_nswap;
+    long delta_minflt = self_usage.ru_minflt - last_minflt;
+    long delta_majflt = self_usage.ru_majflt - last_majflt;
+
+    last_utime = utime;
+    last_stime = stime;
+    last_signals = self_usage.ru_nsignals;
+    last_minflt = self_usage.ru_minflt;
+    last_majflt = self_usage.ru_majflt;
+    last_inblock = self_usage.ru_inblock;
+    last_oublock = self_usage.ru_oublock;
+    last_nswap = self_usage.ru_nswap;
+
+    // fprintf(stderr, "time (tot/usr/sys)=%f/%f/%f total_utime=%f total_stime=%f\n", total_time, delta_utime, delta_stime, last_utime, last_stime);
+    fprintf(stderr, "rusage maxrss=%ld ixrss=%ld idrss=%ld minflt=%ld majflt=%ld nswap=%ld iblock=%ld oblock=%ld msgsnd=%ld msgrcv=%ld nsignals=%ld nvcsw=%ld nivcsw=%ld\n",
+	    self_usage.ru_maxrss,
+	    self_usage.ru_ixrss,
+	    self_usage.ru_isrss,
+	    self_usage.ru_minflt,
+	    self_usage.ru_majflt,
+	    self_usage.ru_nswap,
+	    self_usage.ru_inblock,
+	    self_usage.ru_oublock,
+	    self_usage.ru_msgsnd,
+	    self_usage.ru_msgrcv,
+	    self_usage.ru_nsignals,
+	    self_usage.ru_nvcsw,
+	    self_usage.ru_nivcsw);
+
+    fprintf(stderr, "self_VIRT=%d ru_maxrss=%ld\n", self_VIRT, self_usage.ru_maxrss);
+
+    fprintf(stderr, "cpu bro CPU%% (tot/usr/sys) %f/%f/%f MEM (VIRT/RES/DATA) %d/%d/%d FD=%d SWAP=%ld\n\n", total_time, delta_utime, delta_stime, self_VIRT, self_RES, self_DATA, self_FD, delta_nswap);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_tot", total_time, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_sys", delta_stime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_usr", delta_utime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_mem_vrt", self_VIRT, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_mem_res", self_RES, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_mem_dat", self_DATA, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_fd", self_FD, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_nswap", delta_nswap, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_minflt", delta_minflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_majflt", delta_majflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_inblock", delta_inblock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_oublock", delta_oublock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_signals", delta_nsignals, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"dns_request", CNTS.request, (char*)"c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_reply", CNTS.reply, (char*)"c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_A", CNTS.A, (char*)"c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_AAAA", CNTS.AAAA, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_AAAA", CNTS.AAAA, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_TCP", CNTS.TCP, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_noerror", CNTS.rcode_noerror, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_refused", CNTS.rcode_refused, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_T2R_min", CNTS.T2R_min, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_T2R_max", CNTS.T2R_max, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_T2R_avg", CNTS.T2R_avg, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+    statsd_send(STATSD_LINK, pkt);
+
+    //    mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
 
     // Clear counters
     memset(&CNTS, 0, sizeof(CurCounts));

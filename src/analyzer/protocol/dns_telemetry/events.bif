@@ -163,6 +163,7 @@ extern void __dns_telemetry_fire_owners(double ts);
 extern void __dns_telemetry_fire_qnames(double ts);
 extern void __dns_telemetry_fire_details(double ts, bool terminating);
 extern void __dns_telemetry_zone_info_list();
+extern void __dns_telemetry_set_node_id(const char* id);
 
 %%}
 
@@ -346,5 +347,12 @@ function dns_telemetry_set_do_log_all%(enable:bool%): any
 function dns_telemetry_get_do_log_all%(enable:bool%): any
 %{
 	return new Val(do_details_all, TYPE_BOOL);
+%}
+
+function dns_telemetry_set_node_id%(node_id:string%): any
+%{
+	const char* id = node_id->CheckString();
+	__dns_telemetry_set_node_id(id);
+	return 0;
 %}
 

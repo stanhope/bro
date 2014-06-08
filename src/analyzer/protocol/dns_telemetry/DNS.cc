@@ -33,37 +33,13 @@
 #include "net.c"
 #include "sds.c"
 
-static const char* MY_NODE_ID = "mht1";
-static const char* MY_STATSD_IFACE = "p1p1";
-char MY_MAC_ADDR[16];
-char STATSD_LINK_NAME[32];
+static char MY_NODE_ID[10] = "BEACON_ID";
 statsd_link *STATSD_LINK;
 #define MAX_LINE_LEN 200
 #define PKT_LEN 1400
 
-int find_my_mac(const char *iface, char *mac)
-{
-  struct ifreq ifr;
-  memset(&ifr, 0, sizeof(struct ifreq));
-  strncpy(ifr.ifr_name, iface, IFNAMSIZ);
-  int s = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
-  if (s == -1) {
-    perror("socket");
-    return -1;
-  }
-
-  if ( ioctl(s, SIOCGIFHWADDR, &ifr) == -1 ) {
-    perror("ioctl(SIOCGIFHWADDR)");
-    close(s);
-    return -1;
-  }
-  unsigned char macaddr[6];
-  memcpy(macaddr, ifr.ifr_hwaddr.sa_data, 6);
-  sprintf(mac, "%.2X%.2X%.2X%.2X%.2X%.2X",
-	  macaddr[0], macaddr[1], macaddr[2],
-	  macaddr[3], macaddr[4], macaddr[5]);
-  close(s);
-  return 0;
+void __dns_telemetry_set_node_id(const char* id) {
+  strcpy(MY_NODE_ID, id);
 }
 
 using namespace analyzer::dns_telemetry;
@@ -384,14 +360,8 @@ AnchorMapUpdater::AnchorMapUpdater(char* _fname, double _interval) {
   int size = buf.st_size;
   last = buf.st_mtime;
 
-  if (find_my_mac(MY_STATSD_IFACE, MY_MAC_ADDR) == 0) {
-    fprintf(stderr, "%f statsd_init NODE=%s IFACE=%s MAC_ADDR=%s\n", now, MY_NODE_ID, MY_STATSD_IFACE, MY_MAC_ADDR);
-    snprintf(STATSD_LINK_NAME, sizeof(STATSD_LINK_NAME), "%s", MY_NODE_ID);
-    STATSD_LINK = statsd_init_with_namespace("127.0.0.1", 8125, STATSD_LINK_NAME);
-  } else {
-    fprintf(stderr, "%f statsd_init Invalid statsd config IFACE => %s EXITING\n", now, MY_STATSD_IFACE);
-    exit(1);
-  }
+  fprintf(stderr, "%f statsd_init NODE=%s\n", now, MY_NODE_ID);
+  STATSD_LINK = statsd_init_with_namespace("127.0.0.1", 8125, MY_NODE_ID);
   redis_init();
 }
 
@@ -1163,8 +1133,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       const char* s_orig_addr = orig_addr.c_str();
 
       char redis_cmd[256];
-      char beacon[256];
-      strcpy(beacon, (char*)name);
+      char beacon[256];  
+    strcpy(beacon, (char*)name);
       char* saveptr;
       strtok_r(beacon, ".", &saveptr);
       char* cust_id = strtok_r(NULL, ".", &saveptr);
@@ -2336,7 +2306,7 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
   strcpy(anchor_map_fname, fname);
   char timestr[256];
   strftime(timestr, sizeof(timestr), "%Y%m%dT%H%M%S", localtime(&buf.st_mtime));
-  fprintf(stderr, "%f anchor_map.start %s size=%d cnt=%d (estimate) lastmod=%s", start, fname, size, estimated_cnt, timestr);
+  fprintf(stderr, "%f anchor_map.start %s size=%d cnt=%d (estimate) lastmod=%s\n", start, fname, size, estimated_cnt, timestr);
 
   FILE* f = fopen(fname, "rt");
 

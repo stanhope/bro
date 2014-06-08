@@ -149,6 +149,8 @@ extern bool do_details;
 extern bool do_details_all;
 extern bool do_samples;
 extern uint sample_rate;
+extern bool do_details_statsd;
+extern bool do_details_redis;
 
 extern int  __dns_telemetry_load_anchor_map(const char* zones_fname, const char* details_fname);
 
@@ -276,6 +278,18 @@ function dns_telemetry_set_sample_rate%(rate:count%): count
 function dns_telemetry_set_do_details%(enable:bool%): any
 %{
 	do_details = enable;
+	return 0;
+%}
+
+function dns_telemetry_set_do_details_statsd%(enable:bool%): any
+%{
+	do_details_statsd = enable;
+	return 0;
+%}
+
+function dns_telemetry_set_do_details_redis%(enable:bool%): any
+%{
+	do_details_redis = enable;
 	return 0;
 %}
 

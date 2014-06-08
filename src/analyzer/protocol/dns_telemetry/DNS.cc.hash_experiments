@@ -13,6 +13,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <unordered_map>
+
 #include "NetVar.h"
 #include "DNS.h"
 #include "Sessions.h"
@@ -22,16 +24,22 @@
 #include "File.h"
 
 #include "events.bif.h"
+
+#include <unordered_map>
+#include "hash_func.h"
+
+#include <algorithm>
+#include <vector>
+#include <sparsehash/type_traits.h>
+#include <sparsehash/dense_hash_map>
+#include <sparsehash/sparse_hash_map>
+
 #include <pthread.h>
 
 #include "sys/sysinfo.h"
 #include "sys/times.h"
 #include "sys/vtimes.h"
 #include "statsd-client.c"
-
-#include "hiredis.c"
-#include "net.c"
-#include "sds.c"
 
 static const char* MY_NODE_ID = "mht1";
 static const char* MY_STATSD_IFACE = "p1p1";
@@ -210,7 +218,42 @@ PDict(QnameStats) telemetry_qname_stats;
 PDict(ZoneStats) telemetry_zone_stats;
 PDict(AnchorPoint) telemetry_anchor_map;
 
-// #define DEBUG_ROTATE_LOGGING 
+#define BRO_DICT 1
+
+#define DEBUG_SAMPLING
+
+#ifdef FAST_HASH
+#define FAST_HASH_KEYLEN 64
+#include <fasthash/fast_hash.h>
+#include <fasthash/fast_hash.c>
+fast_hash* anchor_map;
+#endif
+
+#ifdef UNORDERED_MAP
+unordered_map<string, AnchorPoint*> *anchor_map;
+unordered_map<string, AnchorPoint*>::const_iterator got;
+// unordered_map<string, AnchorPoint*, JesteressHashChar, StringKeyEq> zone_info;
+#endif
+
+#ifdef MURMOR_MAP
+unordered_map<string, AnchorPoint*, MurmorChar, StringKeyEq> *anchor_map;
+unordered_map<string, AnchorPoint*, MurmorChar, StringKeyEq>::const_iterator got;
+#endif
+
+#ifdef SUPERFAST_MAP
+unordered_map<string, AnchorPoint*, SuperFastHashChar, StringKeyEq> *anchor_map;
+unordered_map<string, AnchorPoint*>::const_iterator got;
+#endif
+
+#ifdef DENSE_HASH_MAP
+GOOGLE_NAMESPACE::dense_hash_map<string, AnchorPoint*> *anchor_map;
+GOOGLE_NAMESPACE::dense_hash_map<string,AnchorPoint*>::const_iterator got;
+#endif
+
+#ifdef SPARSE_HASH_MAP
+GOOGLE_NAMESPACE::sparse_hash_map<string, AnchorPoint*> *anchor_map;
+GOOGLE_NAMESPACE::sparse_hash_map<string,AnchorPoint*>::const_iterator got;
+#endif
 
 bool do_counts = false;
 bool do_totals = false;
@@ -223,7 +266,6 @@ bool do_details = true;
 bool do_details_all = false;
 uint sample_rate = 1;
 bool do_details_statsd = false;
-bool do_details_redis = false;
 
 #define MAX_LOG_BUFFER 1024*1024
 
@@ -248,8 +290,8 @@ struct DetailLogInfo {
   char* fname;
   BroFile* file;
   FILE* raw_file;
-  uint buflen;
-  uint bufcnt;
+  uint buflen = 0;
+  uint bufcnt = 0;
   char buffer[MAX_LOG_BUFFER];
 };
 
@@ -344,33 +386,6 @@ static int getValues(int* VIRT, int* RES, int* DATA, int* FD){
   return result;
 }
 
-// -------------------------
-// Redis Utils
-// -------------------------
-
-redisContext *REDIS = NULL;
-
-static void redis_init() {
-  struct timeval timeout = { 1, 500000 }; // 1.5 seconds
-  REDIS = redisConnectWithTimeout("127.0.0.1", 6379, timeout);
-  if (REDIS == NULL || REDIS->err) {
-    if (REDIS) {
-      printf("Connection error: %s\n", REDIS->errstr);
-      redisFree(REDIS);
-    } else {
-      printf("Connection error: can't allocate redis context\n");
-    }
-    exit(1);
-  }
-
-}
-
-static void redis_term() {
-  if (REDIS != NULL) {
-    redisFree(REDIS);
-    REDIS = NULL;
-  }
-}
 
 AnchorMapUpdater::AnchorMapUpdater(char* _fname, double _interval) {
   double now = current_time();
@@ -386,19 +401,18 @@ AnchorMapUpdater::AnchorMapUpdater(char* _fname, double _interval) {
 
   if (find_my_mac(MY_STATSD_IFACE, MY_MAC_ADDR) == 0) {
     fprintf(stderr, "%f statsd_init NODE=%s IFACE=%s MAC_ADDR=%s\n", now, MY_NODE_ID, MY_STATSD_IFACE, MY_MAC_ADDR);
-    snprintf(STATSD_LINK_NAME, sizeof(STATSD_LINK_NAME), "%s", MY_NODE_ID);
+    snprintf(STATSD_LINK_NAME, sizeof(STATSD_LINK_NAME), "%s_%s", MY_NODE_ID, MY_MAC_ADDR);
     STATSD_LINK = statsd_init_with_namespace("127.0.0.1", 8125, STATSD_LINK_NAME);
   } else {
     fprintf(stderr, "%f statsd_init Invalid statsd config IFACE => %s EXITING\n", now, MY_STATSD_IFACE);
     exit(1);
   }
-  redis_init();
+
 }
 
 AnchorMapUpdater::~AnchorMapUpdater() {
   fprintf(stderr, "%f AnchorMapUpdater::dtor\n", current_time());
   statsd_finalize(STATSD_LINK);
-  redis_term();
 }
 
 int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname);
@@ -608,6 +622,9 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   // Since we have to do the lookup into the ZoneMap, calculate that as well so as to avoid an extra lookup
 
   char tlz [513];
+#if FAST_HASH
+  memset(tlz,0,513);
+#endif
   AnchorPoint* anchor_entry = 0;
   u_char* name_end = ExtractName(data, len, name, name_len, msg_start, tlz, (void**)&anchor_entry);
 
@@ -638,7 +655,17 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
   if (local_do_zone_stats && dns_telemetry_zone_info) {
 
+#if (UNORDERED_MAP || SUPERFAST_MAP || DENSE_HASH_MAP || SPARSE_HASH_MAP || MURMOR_MAP)
+    got = anchor_map->find(tlz);
+    anchor_entry = got == anchor_map->end() ? NULL : got->second;
+#endif
+#if FAST_HASH
+    void *pval = fast_hash_lookup(anchor_map, tlz, FAST_HASH_KEYLEN);
+    anchor_entry = pval != NULL ? *(AnchorPoint**)pval : NULL;
+#endif
+#if BRO_DICT
     anchor_entry = telemetry_anchor_map.Lookup(zone_hash);
+#endif
 
     if (!anchor_entry) {
       // Get rid of the zoneid based specific hash and use the OTHER zone hash
@@ -1157,22 +1184,6 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       }
     }
 
-    if (do_details_redis && anchor_entry != 0) {
-
-      string orig_addr = analyzer->Conn()->OrigAddr().AsString();
-      const char* s_orig_addr = orig_addr.c_str();
-
-      char redis_cmd[256];
-      char beacon[256];
-      strcpy(beacon, (char*)name);
-      char* saveptr;
-      strtok_r(beacon, ".", &saveptr);
-      char* cust_id = strtok_r(NULL, ".", &saveptr);
-      sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s", network_time,s_orig_addr,beacon,cust_id);
-      redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
-      freeReplyObject(reply);
-    }
-
     if (do_details_statsd && anchor_entry != 0) {
 
       string orig_addr = analyzer->Conn()->OrigAddr().AsString();
@@ -1189,6 +1200,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       char pkt[PKT_LEN];
       statsd_prepare(STATSD_LINK, log_line, 1, "kv", 1, pkt, MAX_LINE_LEN, 1);
       statsd_send(STATSD_LINK, pkt);
+
+      fprintf(stderr, "%s anchor_entry=%p key=%s zid=%d oid=%d details=%d\n", log_line, anchor_entry, anchor_entry->key, anchor_entry->zone_id, anchor_entry->owner_id);
 
     }
     else if (do_details_all || (do_details && do_zone_details)) {
@@ -1227,8 +1240,6 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	    logger->log_id = anchor_entry->log_id;
 	    logger->ts = network_time;
 	    logger->enabled = true;
-	    logger->buflen = 0;
-	    logger->bufcnt = 0;
 	    // Use the base multi-tenant logger's root
 	    logger->fname = DETAIL_DEFAULT_PATH;
 	    DETAIL_LOGGER_INFO.Insert(log_key, logger);
@@ -1500,8 +1511,22 @@ u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
     } else {
       do
 	{
+#if (UNORDERED_MAP || SUPERFAST_MAP || MURMOR_MAP || DENSE_HASH_MAP || SPARSE_HASH_MAP)
+	  got = anchor_map->find(pSearch);
+	  AnchorPoint* anchor_entry = got == anchor_map->end() ? NULL : got->second;
+#endif
+#ifdef FAST_HASH
+	  // fprintf(stderr, "extract_name.lookup %s\t", pSearch);
+	  char key[FAST_HASH_KEYLEN];
+	  memset(key, 0, FAST_HASH_KEYLEN);
+	  strcpy(key, pSearch);
+	  void* pval = fast_hash_lookup(anchor_map, key, FAST_HASH_KEYLEN);
+	  AnchorPoint* anchor_entry = pval != NULL ? *(AnchorPoint**)pval : NULL;
+#endif
+#ifdef BRO_DICT
 	  HashKey *key = new HashKey(pSearch);
 	  AnchorPoint* anchor_entry = telemetry_anchor_map.Lookup(key);
+#endif
 	  if (anchor_entry != 0) {
 	    // We're done.
 	    match = true;
@@ -1509,10 +1534,14 @@ u_char* DNS_Telemetry_Interpreter::ExtractName(const u_char*& data, int& len,
 	    if (pzinfo) {
 	      *pzinfo = anchor_entry;
 	    }
+#ifdef BRO_DICT
 	    delete key;
+#endif
 	    break;
 	  } else {
+#ifdef BRO_DICT
 	    delete key;
+#endif
 	    pSearch = ::strchr(pSearch, '.');
 	  }
 	}
@@ -2311,8 +2340,6 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
     common_logger->fname = DETAIL_DEFAULT_PATH;
     common_logger->owner_id = 0;
     common_logger->enabled = true;
-    common_logger->buflen = 0;
-    common_logger->bufcnt = 0;
     common_logger->log_id = LOGGER_ZONE_ALL;
     if (common_logger->file != 0) {
       delete common_logger->file;
@@ -2337,6 +2364,69 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
   char timestr[256];
   strftime(timestr, sizeof(timestr), "%Y%m%dT%H%M%S", localtime(&buf.st_mtime));
   fprintf(stderr, "%f anchor_map.start %s size=%d cnt=%d (estimate) lastmod=%s", start, fname, size, estimated_cnt, timestr);
+
+#ifdef BRO_DICT
+  fprintf(stderr, "  BRO_DICT MODE\n");
+#endif
+
+#ifdef UNORDERED_MAP
+  fprintf(stderr, "  UNORDERED_MAP MODE\n");
+  anchor_map = new unordered_map<string, AnchorPoint*>(estimated_cnt);
+#endif
+#ifdef SUPERFAST_MAP
+  fprintf(stderr, "  SUPERFAST_MAP MODE\n");
+  anchor_map = new unordered_map<string, AnchorPoint*, SuperFastHashChar, StringKeyEq>(estimated_cnt);
+#endif
+#ifdef MURMOR_MAP
+  fprintf(stderr, "  MURMOR_MAP MODE\n");
+  anchor_map = new unordered_map<string, AnchorPoint*, MurmorChar, StringKeyEq>(estimated_cnt);
+#endif
+#ifdef DENSE_HASH_MAP
+  fprintf(stderr, "  DENSE_HASH_MAP MODE\n");
+  anchor_map = new GOOGLE_NAMESPACE::dense_hash_map<string, AnchorPoint*>(estimated_cnt); 
+  anchor_map->set_empty_key(string());
+#endif
+#ifdef SPARSE_HASH_MAP
+  fprintf(stderr, "  SPARSE_HASH_MAP MODE\n");
+  anchor_map = new GOOGLE_NAMESPACE::sparse_hash_map<string, AnchorPoint*>(estimated_cnt);
+#endif
+#ifdef FAST_HASH
+  fprintf(stderr, "  FAST_HASH MODE\n");
+  anchor_map = fast_hash_init(64);
+  fast_hash_add_hash(anchor_map, 64, 8, estimated_cnt);
+
+  /*
+  uint64_t val1 = 1;
+  uint64_t val2 = 2;
+  uint64_t val3 = 3;
+  char tkey[64] = "one";
+  uint64_t* pval;
+
+  fast_hash_insert(anchor_map, (void*)tkey, 64, &val1);
+  fprintf(stderr, "Inserted %s => %ld\n", tkey, val1);
+  pval = (uint64_t*)fast_hash_lookup(anchor_map, tkey, 64);
+  fprintf(stderr, "lookup '%s' => %ld\n", tkey, *pval);
+  
+  strcpy(tkey, "two");
+  pval = &val2;
+  fast_hash_insert(anchor_map, (void*)tkey, 64, pval);
+  fprintf(stderr, "Inserted %s => %ld\n", tkey, *pval);
+  pval = (uint64_t*)fast_hash_lookup(anchor_map, tkey, 64);
+  fprintf(stderr, "lookup '%s' => %ld\n", tkey, *pval);
+
+  strcpy(tkey, "three");
+  pval = &val3;
+  fast_hash_insert(anchor_map, (void*)tkey, 64, pval);
+  fprintf(stderr, "Inserted %s => %ld\n", tkey, *pval);
+  pval = (uint64_t*)fast_hash_lookup(anchor_map, tkey, 64);
+  fprintf(stderr, "lookup '%s' => %ld\n", tkey, *pval);
+
+  strcpy(tkey, "www.funnyboy.com");
+  fprintf(stderr, "lookup '%s' => ", tkey);
+  pval = (uint64_t*)fast_hash_lookup(anchor_map, tkey, 64);
+  fprintf(stderr, "%ld\n", pval ? *pval : 0);
+  */
+#endif
 
   FILE* f = fopen(fname, "rt");
 
@@ -2380,6 +2470,33 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
 
       AnchorPoint* anchor_entry;
 
+#ifdef FAST_HASH
+      uint name_len = strlen(name);
+      void* got = fast_hash_lookup(anchor_map, (const void*)name, name_len);
+      
+      if (got == NULL) {
+	anchor_entry = new AnchorPoint();
+	char key[FAST_HASH_KEYLEN];
+	memset(key, 0, FAST_HASH_KEYLEN);
+	memcpy(key, name, name_len);
+	fast_hash_insert(anchor_map, key, FAST_HASH_KEYLEN, &anchor_entry);
+	add++;
+
+	/*
+	void* val = fast_hash_lookup(anchor_map, key, 64);
+	AnchorPoint* temp = *(AnchorPoint**)val;
+	fprintf(stderr, "%d %s %p => ptr=%p\n", add, key, anchor_entry, temp);
+	*/
+
+      } else {
+	anchor_entry = (AnchorPoint*)got;
+	if (anchor_entry->zone_id == zone_id && anchor_entry->log_id == log_id && anchor_entry->stat_id == stat_id && anchor_entry->qname_id == qname_id) {
+	  continue;
+	}
+	change++;
+      }
+#endif
+#ifdef BRO_DICT
       HashKey* zone_hash = new HashKey(name);
       anchor_entry = telemetry_anchor_map.Lookup(zone_hash);
       if (!anchor_entry) {
@@ -2387,6 +2504,21 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
 	telemetry_anchor_map.Insert(zone_hash, anchor_entry);
       }
       delete zone_hash;
+#endif
+#if (UNORDERED_MAP || SUPERFAST_MAP || MURMOR_MAP || DENSE_HASH_MAP)
+      got = anchor_map->find(name);
+      if (got == anchor_map->end()) {
+	anchor_entry = new AnchorPoint();
+	anchor_map->insert({name, anchor_entry});
+	add++;
+      } else {
+	anchor_entry = got->second;
+	if (anchor_entry->zone_id == zone_id && anchor_entry->log_id == log_id && anchor_entry->stat_id == stat_id && anchor_entry->qname_id == qname_id) {
+	  continue;
+	}
+	change++;
+      }
+#endif
 
       if (log_id != 0 || qname_id != 0 || stat_id != 0) {
 	fprintf(stderr, "%f anchor_map %s\tzid=%d\toid=%d\tlid=%d\tsid=%d\tqid=%d\n", current_time(), name, zone_id, owner_id, log_id, stat_id, qname_id);
@@ -2459,8 +2591,6 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
 	  logger->zone_id = anchor_entry->zone_id;
 	  logger->ts = network_time;
 	  logger->enabled = true;
-	  logger->buflen = 0;
-	  logger->bufcnt = 0;
 	  logger->fname = common_logger->fname;
 	  HashKey* log_key = new HashKey((bro_int_t)anchor_entry->zone_id);
 	  DETAIL_LOGGER_INFO.Insert(log_key, logger);
@@ -2477,9 +2607,31 @@ int __dns_telemetry_load_anchor_map(const char* fname, const char* details_fname
     fclose(f);
     double diff = current_time() - start;
     double rate = cnt / diff;
+#if (UNORDERED_MAP || MURMOR_MAP || SUPERFAST_MAP)
+    size_t map_size = anchor_map->size();
+    uint ignored = cnt - map_size;
+    fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
+#ifdef DENSE_HASH_MAP
+    size_t map_size = anchor_map->size();
+    uint ignored = cnt - map_size;
+    fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
+#ifdef SPARSE_HASH_MAP
+    size_t map_size = anchor_map->size();
+    uint ignored = cnt - map_size;
+    fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
+#ifdef FAST_HASH
+    size_t map_size = 0;
+    uint ignored = cnt - map_size;
+    fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%lu %.0f/sec \n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
+#ifdef BRO_DICT
     int map_size = telemetry_anchor_map.Length();
     uint ignored = cnt - map_size;
     fprintf(stderr, "%f anchor_map.done time=%f error=%u add=%u change=%u cnt=%d %.0f\n", current_time(), diff, ignored, add, change, map_size, rate);
+#endif
 
     if (ANCHOR_MAP_UPDATER == NULL) {
       ANCHOR_MAP_UPDATER = new AnchorMapUpdater(anchor_map_fname, 5);
@@ -2964,7 +3116,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
     DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(owner_key);
     int* rotated_by = owners.Lookup(owner_key);
 
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
     fprintf(stderr, "Processing logid=%d owner=%d zone=%d rotated=%p file=%p open_logger=%p\n", logger->log_id, logger->owner_id, logger->zone_id, rotated_by, logger->file, open_logger);
 #endif
 
@@ -2975,7 +3127,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 
       if (rotated_by == NULL) {
 	if (logger->buflen != 0) {
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	  fprintf(stderr, "  Flush pending writes len=%u cnt=%u\n", logger->buflen, logger->bufcnt);
 	  logger->file->Write(logger->buffer, logger->buflen);
 	  logger->buflen = 0;
@@ -2985,7 +3137,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 	logger->file->Flush();
 	logger->file->Close();
 	if (strstr(source_fname, logger->file->Name())) {
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	  fprintf(stderr, "  Rotating %s => %s logger=%p\n", source_fname, rotate_fname, logger);
 #endif
 	} else {
@@ -2994,7 +3146,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 	  char rotate_timestamp[128];
 	  sprintf(rotate_timestamp, "-%s.log", timestamp);
 	  strcpy(strstr(rotate_fname, ".log"), rotate_timestamp);
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	  fprintf(stderr, "  Rotating %s => %s logger=%p\n", source_fname, rotate_fname, logger);
 #endif
 	}
@@ -3009,7 +3161,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 	}
       } else {
 	if (strstr(source_fname, logger->file->Name())) {
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	  fprintf(stderr, "  Ignoring %s, already rotated via zoneid=%d file=%p %s\n", source_fname, *rotated_by, logger->file, logger->file->Name());
 #endif
 	} else {
@@ -3017,7 +3169,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 	  char rotate_timestamp[128];
 	  sprintf(rotate_timestamp, "-%s.log", timestamp);
 	  strcpy(strstr(rotate_fname, ".log"), rotate_timestamp);
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	  fprintf(stderr, "  ZZ TODO Rotating %s => %s logger=%p\n", logger->file->Name(), rotate_fname, logger);
 #endif
 	  newf = file_rotate(logger->file->Name(), rotate_fname);
@@ -3031,13 +3183,13 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
       // No open file. Creating empty Common details. 
       // TODO: Consider tracking the number of active zones being common logged. If > 1 then create empty.
       if (!common_rotated) {
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
 #endif
 	FILE* f = fopen(rotate_fname, "wb");
 	fclose(f);
 	common_rotated = true;
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
       } else {
 	fprintf(stderr, "  Common already rotated\n");
 #endif
@@ -3046,7 +3198,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
     } else if (logger->log_id == LOGGER_ZONE_ONLY) {
 
       // Single Zone
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
       fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
 #endif
       FILE* f = fopen(rotate_fname, "wb");
@@ -3056,11 +3208,11 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 
       // Multi-Zone -- we may have already rotated. No need to create if that's the case.
       if (rotated_by != NULL) {
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  NOT creating empty details for %s, already rotated/created zoneid=%d\n", rotate_fname, *rotated_by);
 #endif
       } else {
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  Creating empty details for %s logid=%d owner=%d zone=%d\n", rotate_fname, logger->log_id, logger->owner_id, logger->zone_id);
 #endif
 	FILE* f = fopen(rotate_fname, "wb");
@@ -3077,7 +3229,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 	HashKey* open_logger_key = new HashKey(source_fname);
 	DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
 	if (open_logger != NULL) {
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	  fprintf(stderr, "  Removing open logger info %s\n", source_fname);
 #endif
 	  DETAIL_LOGGER_OPEN.Remove(open_logger_key);
@@ -3088,7 +3240,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
       // Only reopen if we're still logging 
       if (!enabled) {
 	logger->file = NULL;
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	fprintf(stderr, "  Not opening logger file, now not logging for %s %d %d\n", logger->fname, logger->owner_id, logger->log_id);
 #endif
 	unlink(source_fname);
@@ -3097,7 +3249,7 @@ void __dns_telemetry_fire_details(double ts, bool terminating) {
 	  // TODO What if we can't open the file? Permissions, etc...
 	  FILE* f = fopen(source_fname, "wb");
 	  logger->file = new BroFile(f, source_fname, "wb");
-#ifdef DEBUG_ROTATE_LOGGING
+#ifdef ROTATE_LOGGING
 	  fprintf(stderr, "  Opening new logger source=%s file=%p\n", source_fname, logger->file);
 #endif
 	}

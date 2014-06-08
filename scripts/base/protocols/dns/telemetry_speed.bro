@@ -24,6 +24,8 @@ global do_counts=T;
 global do_anyrd=F;
 global do_clients=F;
 global do_details=T;
+global do_details_statsd=F;
+global do_details_redis=F;
 global do_zones=T;
 global do_owners=T;
 global do_qnames=F;
@@ -50,6 +52,8 @@ type ConfigRecord: record {
     clients: bool;
     rate: count;
     log_all: bool;
+    statsd: bool;
+    redis: bool;
 };
 
 type ConfigIdx: record {
@@ -86,7 +90,7 @@ function Log::default_manual_timer_callback(info: Log::ManualTimerInfo) : bool
     dns_telemetry_fire_anyrd(ts);
     dns_telemetry_fire_clients(ts);
     dns_telemetry_fire_zones(ts);
-    dns_telemetry_fire_owners(ts);
+    #dns_telemetry_fire_owners(ts);
     dns_telemetry_fire_qnames(ts);
     dns_telemetry_fire_details(ts, info$is_expire);
     if (do_pcaps) {
@@ -126,6 +130,8 @@ event config_change(description: Input::TableDescription, tpe: Input::Event, lef
 	do_anyrd = item$anyrd;
 	do_clients = item$clients;
 	do_details = item$details;
+	do_details_statsd = item$statsd;
+	do_details_redis = item$redis;;
 	do_zones = item$zones;
 	do_owners = item$owners;
 	do_qnames = item$qnames;
@@ -155,12 +161,9 @@ global first_time_init:bool = T;
 
 event Input::end_of_data(name: string, source: string)
 {
-    print fmt("%f config loaded details=%d zones=%d owners=%d anyrd=%d clients=%d counts=%d rate=%0.5f", current_time(), do_details, do_zones, do_owners, do_anyrd, do_clients, do_counts, 1.0/sample_rate);
+    print fmt("%f config loaded details=%d zones=%d owners=%d anyrd=%d clients=%d counts=%d statsd=%d redis=%drate=%0.5f", current_time(), do_details, do_zones, do_owners, do_anyrd, do_clients, do_counts, do_details_statsd, do_details_redis, 1.0/sample_rate);
     dns_telemetry_set_do_details(do_details);
     dns_telemetry_set_do_zones(do_zones);
-    if (first_time_init) {
-        dns_telemetry_load_anchor_map(path_config_zones, path_log_details);
-    }
     dns_telemetry_set_do_owners(do_owners);
     dns_telemetry_set_do_anyrd(do_anyrd);
     dns_telemetry_set_do_qnames(do_qnames);
@@ -169,8 +172,14 @@ event Input::end_of_data(name: string, source: string)
     dns_telemetry_set_do_totals(T);
     dns_telemetry_set_sample_rate(sample_rate);
     dns_telemetry_set_do_log_all(do_log_all);
+    dns_telemetry_set_do_details_statsd(do_details_statsd);
+    dns_telemetry_set_do_details_redis(do_details_redis);
+
+    if (first_time_init) {
+        dns_telemetry_load_anchor_map(path_config_zones, path_log_details);
+    }
     
-    if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts || do_log_all)
+    if (do_details || do_zones || do_qnames || do_clients || do_anyrd || do_counts || do_log_all || do_details_statsd || do_details_redis)
         local delta:double = init_manual_rotate(current_time());
     local now:double = time_to_double(current_time());
     if (first_time_init) {
@@ -213,12 +222,12 @@ global header_emit:bool = F;
 event dns_telemetry_count(info:dns_telemetry_counts) {
     if (!header_emit) {
 	print "";
-	print "ts network_time lag - request,reply,rejected,logged,MBsec,MBin,MBout,MBsec,rate,T2R_min,T2R_max,T2R_avg,A_T2R_min,A_T2R_max,A_T2R_avg,NX_T2R_min,NX_T2R_max,NX_T2R_avg,CNAME_T2R_min,CNAME_T2R_max,CNAME_T2R_avg,ANY_T2R_min,ANY_T2R_max,ANY_T2R_avg,PTR_T2R_min,PTR_T2R_max,PTR_T2R_avg";
+	print "ts network_time lag - request,reply,rejected,logged, tcp,udp,A,AAAA, MBsec,MBin,MBout,MBsec,rate, T2R_min,T2R_max,T2R_avg,A_T2R_min,A_T2R_max,A_T2R_avg,NX_T2R_min,NX_T2R_max,NX_T2R_avg,CNAME_T2R_min,CNAME_T2R_max,CNAME_T2R_avg,ANY_T2R_min,ANY_T2R_max,ANY_T2R_avg,PTR_T2R_min,PTR_T2R_max,PTR_T2R_avg";
 	header_emit = T;
     }
     if (info$owner == 0) {
 #      print fmt("%s", info);
-      print fmt("%f %s %f - %d,%d,%d,%d,%05.2f,%05.2f,%05.2f,%0.2f, %d,%d,%d, %d,%d,%d, %d,%d,%d, %d,%d,%d, %d,%d,%d, %d,%d,%d",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$logged,info$MBin,info$MBout,info$MBsec,info$rate,info$T2R_min,info$T2R_max,info$T2R_avg, info$A_T2R_min, info$A_T2R_max, info$A_T2R_avg,info$NX_T2R_min, info$NX_T2R_max, info$NX_T2R_avg,info$CNAME_T2R_min, info$CNAME_T2R_max, info$CNAME_T2R_avg,info$ANY_T2R_min, info$ANY_T2R_max, info$ANY_T2R_avg, info$PTR_T2R_min, info$PTR_T2R_max, info$PTR_T2R_avg);
+      print fmt("%f %s %f - %d,%d,%d,%d, T-%d,U-%d,A-%d,AAAA-%d ,%05.2f,%05.2f,%05.2f,%0.2f, %d,%d,%d, %d,%d,%d, %d,%d,%d, %d,%d,%d, %d,%d,%d, %d,%d,%d",info$ts, strftime("%H%M%S", double_to_time(info$ts)), info$lag, info$request,info$reply,info$rejected,info$logged,info$TCP,info$UDP,info$A,info$AAAA,info$MBin,info$MBout,info$MBsec,info$rate,info$T2R_min,info$T2R_max,info$T2R_avg, info$A_T2R_min, info$A_T2R_max, info$A_T2R_avg,info$NX_T2R_min, info$NX_T2R_max, info$NX_T2R_avg,info$CNAME_T2R_min, info$CNAME_T2R_max, info$CNAME_T2R_avg,info$ANY_T2R_min, info$ANY_T2R_max, info$ANY_T2R_avg, info$PTR_T2R_min, info$PTR_T2R_max, info$PTR_T2R_avg);
       Log::write_at(info$ts, DBIND9::COUNTS, info);
     } else if (info$owner == 1) {
 #       print fmt("custom_stat %s", info);

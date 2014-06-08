@@ -985,7 +985,7 @@ void __redisSetError(redisContext *c, int type, const char *str) {
     } else {
         /* Only REDIS_ERR_IO may lack a description! */
         assert(type == REDIS_ERR_IO);
-        strerror_r(errno,c->errstr,sizeof(c->errstr));
+        char* ignore = strerror_r(errno,c->errstr,sizeof(c->errstr));
     }
 }
 

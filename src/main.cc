@@ -201,6 +201,7 @@ void usage()
 	fprintf(stderr, "    -U|--status-file <file>        | Record process status in file\n");
 	fprintf(stderr, "    -W|--watchdog                  | activate watchdog timer\n");
 	fprintf(stderr, "    -X|--broxygen                  | generate documentation based on config file\n");
+	fprintf(stderr, "    -Z|--daemonize <pidfile>       | fork into background\n");
 
 #ifdef USE_PERFTOOLS_DEBUG
 	fprintf(stderr, "    -m|--mem-leaks                 | show leaks  [perftools]\n");
@@ -430,6 +431,29 @@ static void bro_new_handler()
 	out_of_memory("new");
 	}
 
+/**
+ * Writes the pid to the configured pidfile
+ */
+static int write_pidfile(char *pid_file, pid_t pid) {
+    struct stat buf;
+    int stat_res = stat(pid_file, &buf);
+    if (stat_res == 0) {
+      fprintf(stderr, "pid file already exists! (%s)", pid_file);
+        return 1;
+    }
+
+    FILE *file = fopen(pid_file, "w");
+    if (!file) {
+        fprintf(stderr, "Failed to open pid file! (%s)", pid_file);
+        return 1;
+    }
+
+    fprintf(file, "%d", pid);
+    fclose(file);
+
+    return 0;
+}
+
 int main(int argc, char** argv)
 	{
 	std::set_new_handler(bro_new_handler);
@@ -463,6 +487,7 @@ int main(int argc, char** argv)
 	int rule_debug = 0;
 	int RE_level = 4;
 	int print_plugins = 0;
+	char* daemonize = NULL;
 
 	static struct option long_opts[] = {
 		{"bare-mode",	no_argument,		0,	'b'},
@@ -513,6 +538,7 @@ int main(int argc, char** argv)
 #endif
 
 		{"pseudo-realtime",	optional_argument, 0,	'E'},
+		{"daemonize",	optional_argument, 0,	'Z'},
 
 		{0,			0,			0,	0},
 	};
@@ -544,7 +570,7 @@ int main(int argc, char** argv)
 	opterr = 0;
 
 	char opts[256];
-	safe_strncpy(opts, "B:D:e:f:I:i:K:l:n:p:R:r:s:T:t:U:w:x:X:y:Y:z:CFGLNOPSWbdghv",
+	safe_strncpy(opts, "B:D:e:f:I:i:K:l:n:p:R:r:s:T:t:U:w:x:X:y:Y:z:CFGLNOPSWbdghvZ",
 		     sizeof(opts));
 
 #ifdef USE_PERFTOOLS_DEBUG
@@ -739,6 +765,10 @@ int main(int argc, char** argv)
 
 		case 'B':
 			debug_streams = optarg;
+			break;
+
+		case 'Z':
+		        daemonize = optarg;
 			break;
 
 		case 0:
@@ -1110,6 +1140,45 @@ int main(int argc, char** argv)
 
 	if ( override_ignore_checksums )
 		ignore_checksums = 1;
+
+	if (daemonize != NULL) {
+
+	  pid_t pid, sid;
+	  int fd;
+	  pid = fork();
+
+	  // Exit if we failed to fork
+	  if (pid < 0) {
+            fprintf(stderr, "Failed to fork() daemon!\n");
+            exit(1);
+	  }
+
+	  // Parent process returns
+	  if (pid) {
+	    return 0;
+	  }
+
+	  // Create a new session
+	  sid = setsid();
+	  if (sid < 0) {
+            fprintf(stderr, "Failed to set daemon SID!\n");
+            return 1;
+	  }
+
+	  int write_pidfile_res = write_pidfile(daemonize, sid);
+	  if (write_pidfile_res) {
+            fprintf(stderr, "Failed to write pidfile %s. Terminating.\n", daemonize);
+            exit(1);
+	  }
+
+	  if ((fd = open("/dev/null", O_RDWR, 0)) != -1) {
+	    dup2(fd, STDIN_FILENO);
+	    dup2(fd, STDOUT_FILENO);
+	    dup2(fd, STDERR_FILENO);
+	    if (fd > STDERR_FILENO) close(fd);
+	  }
+
+	}
 
 	// Queue events reporting loaded scripts.
 	for ( std::list<ScannedFile>::iterator i = files_scanned.begin(); i != files_scanned.end(); i++ )

@@ -1138,7 +1138,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       char* saveptr;
       strtok_r(beacon, ".", &saveptr);
       char* cust_id = strtok_r(NULL, ".", &saveptr);
-      sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s", network_time,s_orig_addr,beacon,cust_id);
+      sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s,%s", network_time,s_orig_addr,MY_NODE_ID,beacon,cust_id);
       redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
       freeReplyObject(reply);
     }

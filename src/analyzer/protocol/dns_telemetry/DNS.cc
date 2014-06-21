@@ -29,6 +29,7 @@
 #include "sys/vtimes.h"
 #include "statsd-client.c"
 
+#include <Judy.h>
 #include "hiredis.c"
 #include "net.c"
 #include "sds.c"
@@ -323,6 +324,12 @@ static int getValues(int* VIRT, int* RES, int* DATA, int* FD){
 // -------------------------
 // Redis Utils
 // -------------------------
+
+Pvoid_t EVENT_CACHE = (Pvoid_t) NULL;
+Word_t  EVENT_TOTAL = 0;
+Word_t  EVENT_COUNT = 0;
+const char* EVENT_CHANNEL = "beacon";
+#define MAXVAL 32
 
 redisContext *REDIS = NULL;
 
@@ -1132,15 +1139,32 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       string orig_addr = analyzer->Conn()->OrigAddr().AsString();
       const char* s_orig_addr = orig_addr.c_str();
 
-      char redis_cmd[256];
       char beacon[256];  
-    strcpy(beacon, (char*)name);
+      strcpy(beacon, (char*)name);
       char* saveptr;
       strtok_r(beacon, ".", &saveptr);
+      char* cust_data = strtok_r(NULL, ".", &saveptr);
       char* cust_id = strtok_r(NULL, ".", &saveptr);
-      sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id);
+
+      char redis_cmd[256];
+#if PUBLISH_REALTIME
+      sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id, cust_data);
       redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
       freeReplyObject(reply);
+#else
+      // Add to event cache. Flushed when we dump per second stats
+      char* val = (char*)malloc(256);
+      sprintf(val, "%f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id,cust_data);
+      PWord_t PV = NULL;
+      ++EVENT_COUNT;
+      // JLI(PV, EVENT_CACHE, EVENT_COUNT);
+      JError_t J_Error;
+      if (((PV) = (PWord_t)JudyLIns(&EVENT_CACHE, EVENT_COUNT, &J_Error)) == PJERR) {
+	J_E("JudyLIns", &J_Error);
+      }
+      *PV = (Word_t)val;
+#endif
+
     }
 
     if (do_details_statsd && anchor_entry != 0) {
@@ -2731,6 +2755,70 @@ void __dns_telemetry_fire_counts(double ts) {
     statsd_prepare(STATSD_LINK, (char*)"dns_T2R_avg", CNTS.T2R_avg, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
     statsd_send(STATSD_LINK, pkt);
+
+    if (do_details_redis) {
+
+      Word_t delta = EVENT_COUNT - EVENT_TOTAL;
+      EVENT_TOTAL = EVENT_COUNT;
+
+      if (delta > 0) {
+	// Emit 32K msg at a time
+	char buffer[32*1024];
+	uint bufi = 0;
+	// Dump cached events and publish them
+	Word_t cache_count = 0;
+	PWord_t PV = NULL;
+	
+	sprintf(buffer, "PUBLISH %s ", EVENT_CHANNEL);
+	bufi = strlen(buffer);
+	buffer[bufi] = 0;
+
+	Word_t Index;
+	// JLF(PV, EVENT_CACHE, Index);
+	// J_1P(PV,    EVENT_CACHE, &(Index), JudyLFirst, "JudyLFirst");
+	JError_t J_Error;
+	if (((PV) = (PWord_t)JudyLFirst(EVENT_CACHE, &Index, &J_Error)) == PJERR) J_E("JudyLFirst", &J_Error);
+	
+	while (PV != NULL) {
+	  ++cache_count;
+	  const char* val = (const char*)*PV;
+	  uint len = strlen(val);
+	  // fprintf(stderr, "  cached key: %lu val: %s\n", Index, val);
+	  if (bufi + len > sizeof(buffer)) {
+	    // fprintf(stderr, "%s\n", buffer);
+	    redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+	    freeReplyObject(reply);
+	    sprintf(buffer, "PUBLISH %s ", EVENT_CHANNEL);
+	    bufi = strlen(buffer);
+	    buffer[bufi] = 0;
+	  } 
+
+	  // Cache the value
+	  if (bufi > 30) {
+	    buffer[bufi++] = '|';
+	  }
+	  memcpy(buffer+bufi, (void*)*PV, len);
+	  bufi += len;
+	  buffer[bufi] = 0;
+	  
+	  free((void*)val);
+	  // JLN(PV, EVENT_CACHE, Index);   // get next string
+	  JError_t J_Error;
+	  if (((PV) = (PWord_t)JudyLNext(EVENT_CACHE, &Index, &J_Error)) == PJERR) J_E("JudyLNext", &J_Error);
+	}
+	
+	// Cleanup array
+	Word_t index_size;  
+	JLFA(index_size, EVENT_CACHE);
+	
+	// fprintf(stderr, "%s\n", buffer);
+	// fprintf(stderr, "The index used %lu bytes of memory, total cache cost: %lu expected=%lu found=%lu total=%lu\n", index_size, (cache_count*MAXKEY)+index_size, delta, cache_count, EVENT_TOTAL);
+
+	redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+	freeReplyObject(reply);
+
+      }
+    }
 
     mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
 

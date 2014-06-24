@@ -600,7 +600,9 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
   // fprintf(stderr, "..ParseQuestion qname=%s len=%d tlz=%s anchor=%p query=%d rcode=%d id=%d\n", name, len, tlz, anchor_entry, is_query, msg->rcode, msg->id);
 
-  const char* s_orig_addr = analyzer->Conn()->OrigAddr().AsString().c_str();
+  const char* s_addr = analyzer->Conn()->OrigAddr().AsString().c_str();
+  char s_orig_addr[32];
+  strcpy(s_orig_addr, s_addr);	// save copy Conn() calls will reset this pointer
 
   // Ignore stats on requests originating on the 10 net.
   bool skip = false;
@@ -1142,33 +1144,31 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
       if (do_details_redis && anchor_entry != 0) {
 
-	if (strstr(s_orig_addr, "10.") != NULL) {
-	  char beacon[256];  
-	  strcpy(beacon, (char*)name);
-	  char* saveptr;
-	  strtok_r(beacon, ".", &saveptr);
-	  char* cust_data = strtok_r(NULL, ".", &saveptr);
-	  char* cust_id = strtok_r(NULL, ".", &saveptr);
-
-	  char redis_cmd[256];
+	char beacon[256];  
+	strcpy(beacon, (char*)name);
+	char* saveptr;
+	strtok_r(beacon, ".", &saveptr);
+	char* cust_data = strtok_r(NULL, ".", &saveptr);
+	char* cust_id = strtok_r(NULL, ".", &saveptr);
+	
+	char redis_cmd[256];
 #if PUBLISH_REALTIME
-	  sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id, cust_data);
-	  redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
-	  freeReplyObject(reply);
+	sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id, cust_data);
+	redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
+	freeReplyObject(reply);
 #else
-	  // Add to event cache. Flushed when we dump per second stats
-	  char* val = (char*)malloc(256);
-	  sprintf(val, "%f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id,cust_data);
-	  PWord_t PV = NULL;
-	  ++EVENT_COUNT;
-	  // fprintf(stderr, "%s %lu\n", val, EVENT_COUNT);
-	  JError_t J_Error;
-	  if (((PV) = (PWord_t)JudyLIns(&EVENT_CACHE, EVENT_COUNT, &J_Error)) == PJERR) {
-	    J_E("JudyLIns", &J_Error);
-	  }
-	  *PV = (Word_t)val;
-#endif
+	// Add to event cache. Flushed when we dump per second stats
+	char* val = (char*)malloc(256);
+	sprintf(val, "%f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id,cust_data);
+	PWord_t PV = NULL;
+	++EVENT_COUNT;
+	// fprintf(stderr, "%s %lu\n", val, EVENT_COUNT);
+	JError_t J_Error;
+	if (((PV) = (PWord_t)JudyLIns(&EVENT_CACHE, EVENT_COUNT, &J_Error)) == PJERR) {
+	  J_E("JudyLIns", &J_Error);
 	}
+	*PV = (Word_t)val;
+#endif
       }
 
       if (do_details_statsd && anchor_entry != 0) {
@@ -1196,8 +1196,8 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	string resp_addr = analyzer->Conn()->RespAddr().AsString();
 	const char* s_resp_addr = resp_addr.c_str();
 
-	string orig_addr = analyzer->Conn()->OrigAddr().AsString();
-	const char* s_orig_addr = orig_addr.c_str();
+	// string orig_addr = analyzer->Conn()->OrigAddr().AsString();
+	// const char* s_orig_addr = orig_addr.c_str();
 	// fprintf(stderr, "REPLY|ORIG: %s RESP: %s id=%d qtype=%u rcode=%u %f %f t2r=%u\n", s_orig_addr, s_resp_addr, msg->id, orig_qtype, msg->rcode, network_time, start_time, t2r);
 
 	char log_line[256];
@@ -1375,7 +1375,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       }
     }
     delete zone_hash;
-  }
+  } 
 
   // Consume the unused type/class.
   (void) ExtractShort(data, len);
@@ -2629,7 +2629,8 @@ static int last_FD = 0;
 
 void __dns_telemetry_fire_counts(double ts) {
   if ( dns_telemetry_count ) {
-    double lag = current_time() - ts;
+    double start = current_time();
+    double lag = start - ts;
     val_list* vl = buildCountsRecord(&CNTS, 0, ts, lag, sample_rate, false);
     if (lag > 2) {
       fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
@@ -2812,6 +2813,15 @@ void __dns_telemetry_fire_counts(double ts) {
 	freeReplyObject(reply);
 
       }
+
+      // Simple heartbeat to keep the channel alive 
+      if ((int)start % 30 == 0) {
+	char redis_cmd[256];
+	sprintf(redis_cmd, "PUBLISH beacon %f,A,%s,%s,%s", start,MY_NODE_ID,"127.0.0.0","DNS_PULSE");
+	redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
+	freeReplyObject(reply);
+      }
+
     }
 
     mgr.Dispatch(new Event(dns_telemetry_count, vl), true);

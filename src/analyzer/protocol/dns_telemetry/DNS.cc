@@ -600,793 +600,787 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
   // fprintf(stderr, "..ParseQuestion qname=%s len=%d tlz=%s anchor=%p query=%d rcode=%d id=%d\n", name, len, tlz, anchor_entry, is_query, msg->rcode, msg->id);
 
-  bool local_do_counts = do_counts;
-  bool local_do_zone_stats = do_zone_stats;
-  bool local_do_owner_stats = do_owner_stats;
-  bool local_do_qname_stats = do_qname_stats;
+  const char* s_orig_addr = analyzer->Conn()->OrigAddr().AsString().c_str();
 
-  EventHandlerPtr dns_event = 0;
-  ZoneStats* zone_stats = 0;
-  OwnerStats* owner_stats = 0;
-  bool do_zone_details = false;
-  CurCounts* custom_stats= 0;
-  bro_int_t owner_id = 0;
-  HashKey* zone_hash = new HashKey(tlz);
-
-  if (local_do_zone_stats && dns_telemetry_zone_info) {
-
-    anchor_entry = telemetry_anchor_map.Lookup(zone_hash);
-
-    if (!anchor_entry) {
-      // Get rid of the zoneid based specific hash and use the OTHER zone hash
-      delete zone_hash;
-      const char other[] = "?";
-      HashKey* other_hash = new HashKey(other);
-      zone_stats = telemetry_zone_stats.Lookup(other_hash);
-      zone_hash = other_hash;
-
-    } else {
-      zone_stats = telemetry_zone_stats.Lookup(zone_hash);
-      do_zone_details = anchor_entry->details;
-      owner_id = (bro_int_t)anchor_entry->owner_id;
-      HashKey* stat_logger_key = new HashKey(owner_id);
-      StatsLogInfo* stat_logger = STATS_LOGGER_INFO.Lookup(stat_logger_key);
-      if (stat_logger) {
-	custom_stats = &stat_logger->CNTS;
-      }
-      delete stat_logger_key;
-    }
+  // Ignore stats on requests originating on the 10 net.
+  bool skip = false;
+  if (strstr(s_orig_addr, "10.") != NULL) {
+    skip = true;
   }
 
-  // Detemrine if we should do additional processing based on sampling rate.
-  if (sample_rate != 1) {
-    local_do_counts = (TOTALS.request % sample_rate) == 0;
-    if (do_counts && local_do_counts == false) {
-      local_do_zone_stats = false;
-      local_do_qname_stats = false;
-      local_do_owner_stats = false;
-      if (is_query) {
-	++TOTALS.request;
+  if (!skip) {
+
+    bool local_do_counts = do_counts;
+    bool local_do_zone_stats = do_zone_stats;
+    bool local_do_owner_stats = do_owner_stats;
+    bool local_do_qname_stats = do_qname_stats;
+
+    EventHandlerPtr dns_event = 0;
+    ZoneStats* zone_stats = 0;
+    OwnerStats* owner_stats = 0;
+    bool do_zone_details = false;
+    CurCounts* custom_stats= 0;
+    bro_int_t owner_id = 0;
+    HashKey* zone_hash = new HashKey(tlz);
+
+    if (local_do_zone_stats && dns_telemetry_zone_info) {
+
+      anchor_entry = telemetry_anchor_map.Lookup(zone_hash);
+
+      if (!anchor_entry) {
+	// Get rid of the zoneid based specific hash and use the OTHER zone hash
+	delete zone_hash;
+	const char other[] = "?";
+	HashKey* other_hash = new HashKey(other);
+	zone_stats = telemetry_zone_stats.Lookup(other_hash);
+	zone_hash = other_hash;
+
       } else {
-	++TOTALS.reply;
-      }
-    }
-  }
-
-  if (local_do_counts) {
-
-    if (is_query) {
-
-      ++CNTS.request;
-      ++TOTALS.request;
-
-      if (custom_stats) {
-	++custom_stats->request;
-	custom_stats->qlen += qlen;
-      }	
-      
-      if (analyzer->Conn()->ConnTransport() == TRANSPORT_TCP) {
-	++CNTS.TCP;
-	++TOTALS.TCP;
-	if (custom_stats) ++custom_stats->TCP;
-      } else {
-	// Not really true :-(
-	++CNTS.UDP;
-	++TOTALS.UDP;
-	if (custom_stats) ++custom_stats->UDP;
-      }
-      
-      if (analyzer->Conn()->GetOrigFlowLabel() == 0) {
-	++CNTS.V4;
-	++TOTALS.V4;
-	if (custom_stats) ++custom_stats->V4;
-      } else {
-	++CNTS.V6;
-	++TOTALS.V6;
-	if (custom_stats) ++custom_stats->V4;
-      }
-
-      switch (msg->opcode) 
-	{
-	case DNS_OP_QUERY:
-	  ++CNTS.OpQuery;
-	  ++TOTALS.OpQuery;
-	  if (custom_stats) ++custom_stats->OpQuery;
-	  break;
-	case DNS_OP_IQUERY:
-	  ++CNTS.OpIQuery;
-	  ++TOTALS.OpIQuery;
-	  if (custom_stats) ++custom_stats->OpIQuery;
-	  break;
-	case DNS_OP_SERVER_STATUS:
-	  ++CNTS.OpStatus;
-	  ++TOTALS.OpStatus;
-	  if (custom_stats) ++custom_stats->OpStatus;
-	  break;
-	case 4:
-	  ++CNTS.OpNotify;
-	  ++TOTALS.OpNotify;
-	  if (custom_stats) ++custom_stats->OpNotify;
-	  break;
-	case 5:
-	  ++CNTS.OpUpdate;
-	  ++TOTALS.OpUpdate;
-	  if (custom_stats) ++custom_stats->OpUpdate;
-	  break;
-	default:
-	  ++CNTS.OpUnassigned;
-	  ++TOTALS.OpUnassigned;
-	  if (custom_stats) ++custom_stats->OpUnassigned;
-	  break;
+	zone_stats = telemetry_zone_stats.Lookup(zone_hash);
+	do_zone_details = anchor_entry->details;
+	owner_id = (bro_int_t)anchor_entry->owner_id;
+	HashKey* stat_logger_key = new HashKey(owner_id);
+	StatsLogInfo* stat_logger = STATS_LOGGER_INFO.Lookup(stat_logger_key);
+	if (stat_logger) {
+	  custom_stats = &stat_logger->CNTS;
 	}
-      if (msg->RD) {
-	++CNTS.RD;
-	++TOTALS.RD;
-	if (custom_stats) ++custom_stats->RD;
+	delete stat_logger_key;
       }
-    } else {
-      if (custom_stats) {
-	custom_stats->rlen += rlen;
-      }	
     }
-  }
 
-  if (local_do_owner_stats && is_query) {
-    // NOTE: The owner_id may the actual zone's ... or the OTHER owner id (0)
-    HashKey* key = new HashKey(owner_id);
-    owner_stats = OWNER_INFO.Lookup(key);
-    if (owner_stats == 0) {
-      // We don't even have an OTHER stats collector yet, create one
-      owner_stats = new OwnerStats();
-      owner_stats->id = 0;
-      owner_stats->cnt = 0;
-      OWNER_INFO.Insert(key, owner_stats);
-    }
-    ++owner_stats->cnt;
-    delete key;
-  }
-
-  if (local_do_counts && !zone_stats) {
-    
-    ++CNTS.zones;
-    if (custom_stats) 
-      ++custom_stats->zones;
-    zone_stats = new ZoneStats();
-    zone_stats->cnt = 0;
-    
-    if (anchor_entry) {
-      // An anchor point that  we know about
-      strcpy(zone_stats->key, tlz);
-      zone_stats->zone_id = anchor_entry->zone_id;
-      zone_stats->owner_id = anchor_entry->owner_id;
-    } else {
-      // OTHER bucket for now
-      strcpy(zone_stats->key, "?");
-      zone_stats->zone_id = 0;
-      zone_stats->owner_id = 0;
-    }
-    telemetry_zone_stats.Insert(zone_hash, zone_stats);
-  }
-
-  QnameStats* qname_stat = 0;
-
-  if (is_query && local_do_qname_stats && dns_telemetry_qname_info) {
-    if (anchor_entry) {
-      HashKey* filter_key = new HashKey((bro_int_t)anchor_entry->zone_id);
-      QnameFilter* filter = QNAME_FILTERS.Lookup(filter_key);
-      if (filter && filter->enabled) {
-	char qname_key[256];
-	sprintf(qname_key, "%s", name);
-	HashKey* qname_hash = new HashKey(qname_key);
-	qname_stat = telemetry_qname_stats.Lookup(qname_hash);
-	if (!qname_stat) {
-	  qname_stat = new QnameStats();
-	  qname_stat->cnt = 0;
-	  telemetry_qname_stats.Insert(qname_hash, qname_stat);
+    // Detemrine if we should do additional processing based on sampling rate.
+    if (sample_rate != 1) {
+      local_do_counts = (TOTALS.request % sample_rate) == 0;
+      if (do_counts && local_do_counts == false) {
+	local_do_zone_stats = false;
+	local_do_qname_stats = false;
+	local_do_owner_stats = false;
+	if (is_query) {
+	  ++TOTALS.request;
 	} else {
-	  ++qname_stat->cnt;
+	  ++TOTALS.reply;
 	}
-	delete qname_hash;
-	qname_stat->zone_id = anchor_entry->zone_id;
-	qname_stat->owner_id = anchor_entry->owner_id;
-      }
-      delete filter_key;
-      local_do_qname_stats = qname_stat != NULL;
-    } else {
-      // fprintf(stderr, "ERROR: No anchor entry! name=%s tlz=%s\n", name, tlz);
-      local_do_qname_stats = false;
-    }
-  }
-
-  if ( msg->QR == 0 ) {
-
-    dns_event = dns_telemetry_request;
-
-    RR_Type qtype = RR_Type(ExtractShort(data, len));
-    msg->qtype = qtype;
-    
-    if (local_do_zone_stats) {
-      ++zone_stats->cnt;
-      if (msg->RD) {
-	++zone_stats->RD;
       }
     }
-	
-    const IPAddr& orig_addr = analyzer->Conn()->OrigAddr();
-    string sAddr = orig_addr.AsString();
-    const char* sAddr_cstr = sAddr.c_str();
 
-    const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
-    string sAddrResp = resp_addr.AsString();
-    const char* sAddrResp_cstr = sAddrResp.c_str();
+    if (local_do_counts) {
 
-    // fprintf(stderr, "QUERY|ORIG: %s RESP: %s id=%d qtype=%u %f\n", sAddr_cstr, sAddrResp_cstr, msg->id, msg->qtype, network_time);
+      if (is_query) {
 
-    if (is_query) {
-      // Remember the client's IP. Use the message transaction id as the temporary key. 
-      // There is chance of a small/probablistic chance of collision. See BRO transaction id comments in their source code.
-      HashKey* client_hash = new HashKey((uint32)msg->id);
-      QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
-      if (query_client) {
-	query_client->start = network_time;
-	query_client->qtype = msg->qtype;
-      } else {
-	query_client = new QueryClient();
-	query_client->start = network_time;
-	query_client->qtype = msg->qtype;
-	QUERY_CLIENTS.Insert(client_hash, query_client);
-      }
-      delete client_hash;
-    }
+	++CNTS.request;
+	++TOTALS.request;
 
-    if (is_query && do_client_stats) {
-
-      HashKey* client_hash = new HashKey(sAddr_cstr);
-      int* client_idx = telemetry_client_stats.Lookup(client_hash);
-      if (client_idx) {
-	++(*client_idx);
-      } else {
-	telemetry_client_stats.Insert(client_hash, new int(1));
-	if (local_do_counts) {
-	  ++CNTS.clients;
-	}
-	++TOTALS.clients;
 	if (custom_stats) {
-	  ++custom_stats->clients;
-	}
-      }
-      delete client_hash;
-    }
-
-    if (local_do_counts) {
-      switch (qtype) 
-	{
-	case TYPE_A:
-	  // fprintf(stderr, "QUERY|qtype=%u %f\n", qtype, network_time);
-	  ++CNTS.A;
-	  ++TOTALS.A;
-	  if (custom_stats) 
-	    ++custom_stats->A;
-	  if (local_do_qname_stats)
-	    ++qname_stat->A;
-	  if (do_zone_stats)
-	    ++zone_stats->A;
-	  break;
-	case TYPE_NS:
-	  ++CNTS.NS;
-	  ++TOTALS.NS;
-	  if (custom_stats) 
-	    ++custom_stats->NS;
-	  if (local_do_qname_stats)
-	    ++qname_stat->NS;
-	  if (do_zone_stats)
-	    ++zone_stats->NS;
-	  break;
-	case TYPE_CNAME:
-	  ++CNTS.CNAME;
-	  ++TOTALS.CNAME;
-	  if (custom_stats) 
-	    ++custom_stats->CNAME;
-	  if (local_do_qname_stats)
-	    ++qname_stat->CNAME;
-	  if (do_zone_stats)
-	    ++zone_stats->CNAME;
-	  break;
-	case TYPE_SOA:
-	  ++CNTS.SOA;
-	  ++TOTALS.SOA;
-	  if (custom_stats) 
-	    ++custom_stats->SOA;
-	  if (local_do_qname_stats)
-	    ++qname_stat->SOA;
-	  if (do_zone_stats)
-	    ++zone_stats->SOA;
-	  break;
-	case TYPE_PTR:
-	  ++CNTS.PTR;
-	  ++TOTALS.PTR;
-	  if (custom_stats) 
-	    ++custom_stats->PTR;
-	  if (local_do_qname_stats)
-	    ++qname_stat->PTR;
-	  if (do_zone_stats)
-	    ++zone_stats->PTR;
-	  break;
-	case TYPE_MX:
-	  ++CNTS.MX;
-	  ++TOTALS.MX;
-	  if (custom_stats) 
-	    ++custom_stats->MX;
-	  if (local_do_qname_stats)
-	    ++qname_stat->MX;
-	  if (do_zone_stats)
-	    ++zone_stats->MX;
-	  break;
-	case TYPE_TXT:
-	  ++CNTS.TXT;
-	  ++TOTALS.TXT;
-	  if (custom_stats) 
-	    ++custom_stats->TXT;
-	  if (local_do_qname_stats)
-	    ++qname_stat->TXT;
-	  if (do_zone_stats)
-	    ++zone_stats->TXT;
-	  break;
-	case TYPE_AAAA:
-	  ++CNTS.AAAA;
-	  ++TOTALS.AAAA;
-	  if (custom_stats) 
-	    ++custom_stats->AAAA;
-	  if (local_do_qname_stats)
-	    ++qname_stat->AAAA;
-	  if (do_zone_stats)
-	    ++zone_stats->AAAA;
-	  break;
-	case TYPE_SRV:
-	  ++CNTS.SRV;
-	  ++TOTALS.SRV;
-	  if (custom_stats) 
-	    ++custom_stats->SRV;
-	  if (local_do_qname_stats)
-	    ++qname_stat->SRV;
-	  if (do_zone_stats)
-	    ++zone_stats->SRV;
-	  break;
-	case TYPE_ALL:
-	  ++CNTS.ANY;
-	  ++TOTALS.ANY;
-	  if (custom_stats) 
-	    ++custom_stats->ANY;
-	  if (local_do_qname_stats)
-	    ++qname_stat->other;
-	  if (do_zone_stats)
-	    ++zone_stats->other;
-	  if (msg->RD) {
-	    ++CNTS.ANY_RD;
-	    ++TOTALS.ANY_RD;
-	  if (custom_stats) 
-	    ++custom_stats->RD;
-
-	    if (do_anyrd_stats) {
-	      char anyrd_key[560];
-	      sprintf(anyrd_key, "%s|%s", sAddr.c_str(), name);
-	      HashKey* anyrd_hash = new HashKey(anyrd_key);
-	      // fprintf(stderr, "ANYRD key=%s len=%u hash_key=%s key_size=%d\n", anyrd_key, (unsigned int)strlen(anyrd_key), (const char*)anyrd_hash->Key(), anyrd_hash->Size());
-	      int* count_idx = telemetry_anyrd_counts.Lookup(anyrd_hash);
-	      if (count_idx) {
-		++(*count_idx);
-	      } else {
-		telemetry_anyrd_counts.Insert(anyrd_hash, new int(1));
-	      }
-	      delete anyrd_hash;
-	    }
-
-	  }
-	  break;
-	default:
-	  ++CNTS.other;
-	  ++TOTALS.other;
-	  if (custom_stats) 
-	    ++custom_stats->other;
-	  if (local_do_qname_stats)
-	    ++qname_stat->other;
-	  if (do_zone_stats)
-	    ++zone_stats->other;
-	  break;
-	}
-    }
-  }
-  else if ( msg->QR == 1 &&  msg->ancount == 0 && msg->nscount == 0 && msg->arcount == 0 ) {
-    // Service rejected in some fashion, and it won't be reported
-    // via a returned RR because there aren't any.
-    dns_event = dns_telemetry_rejected;
-    if (local_do_counts) {
-      ++CNTS.rejected;
-      ++CNTS.rcode_refused;
-      ++TOTALS.rejected;
-      ++TOTALS.rcode_refused;
-      if (custom_stats) {
-	++custom_stats->rejected;
-	++custom_stats->rcode_refused;
-      }
-    }
-
-    string resp_addr = analyzer->Conn()->RespAddr().AsString();
-    const char* s_resp_addr = resp_addr.c_str();
-
-    HashKey* client_hash = new HashKey((uint32)msg->id);
-    QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
-    double start_time = 0;
-    uint orig_qtype = 0;
-    if (query_client) {
-      start_time = query_client->start;
-      orig_qtype = query_client->qtype;
-      // TODO: Delete? Do we care. If we overlap on a 32bit int we're just eating memory
-    }
-    delete client_hash;
-    uint t2r = (network_time - start_time)*1000000; // As unsigned micro seconds!
-
-    CNTS.T2R_min = CNTS.T2R_min == 0 ? t2r : min(CNTS.T2R_min, t2r);
-    CNTS.T2R_max = max(CNTS.T2R_max, t2r);
-    CNTS.T2R_avg += t2r;
-
-    // fprintf(stderr, "..ORIG qtype=%u A T2R %f\n", orig_qtype, network_time);
-
-    switch (orig_qtype) {
-    case TYPE_A:
-    case TYPE_AAAA:
-      {
-	CNTS.A_T2R_min = CNTS.A_T2R_min == 0 ? t2r : min(CNTS.A_T2R_min, t2r);
-	CNTS.A_T2R_max = max(CNTS.A_T2R_max, t2r);
-	CNTS.A_T2R_avg += t2r;
-	break;
-      }
-    case TYPE_CNAME:
-      {
-	CNTS.CNAME_T2R_min = CNTS.CNAME_T2R_min == 0 ? t2r : min(CNTS.CNAME_T2R_min, t2r);
-	CNTS.CNAME_T2R_max = max(CNTS.CNAME_T2R_max, t2r);
-	CNTS.CNAME_T2R_avg += t2r;
-	break;
-      }
-    case TYPE_ALL:
-      {
-	CNTS.ANY_T2R_min = CNTS.ANY_T2R_min == 0 ? t2r : min(CNTS.ANY_T2R_min, t2r);
-	CNTS.ANY_T2R_max = max(CNTS.ANY_T2R_max, t2r);
-	CNTS.ANY_T2R_avg += t2r;
-	break;
-      }
-    case TYPE_PTR:
-      {
-	CNTS.PTR_T2R_min = CNTS.PTR_T2R_min == 0 ? t2r : min(CNTS.PTR_T2R_min, t2r);
-	CNTS.PTR_T2R_max = max(CNTS.PTR_T2R_max, t2r);
-	CNTS.PTR_T2R_avg += t2r;
-	break;
-      }
-    default:
-      {
-	break;
-      }
-    }
-    if (local_do_zone_stats)
-      ++zone_stats->REFUSED;
-  } else {
-
-    // A REPLY. We don't do details until we've received the reply because of what we want to includes as part of that.
-    dns_event = dns_telemetry_query_reply;
-
-    HashKey* client_hash = new HashKey((uint32)msg->id);
-    QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
-    double start_time = 0;
-    uint orig_qtype = 0;
-    if (query_client) {
-      start_time = query_client->start;
-      orig_qtype = query_client->qtype;
-      // TODO: Delete? Do we care. If we overlap on a 32bit int we're just eating memory
-    }
-    delete client_hash;
-    uint t2r = (network_time - start_time)*1000000; // As unsigned micro seconds!
-    
-    CNTS.T2R_min = CNTS.T2R_min == 0 ? t2r : min(CNTS.T2R_min, t2r);
-    CNTS.T2R_max = max(CNTS.T2R_max, t2r);
-    CNTS.T2R_avg += t2r;
-    
-    if (msg->rcode == DNS_CODE_NAME_ERR) {
-      CNTS.NX_T2R_min = CNTS.NX_T2R_min == 0 ? t2r : min(CNTS.NX_T2R_min, t2r);
-      CNTS.NX_T2R_max = max(CNTS.NX_T2R_max, t2r);
-      CNTS.NX_T2R_avg += t2r;
-    }
-
-    // fprintf(stderr, "..ORIG qtype=%u A T2R %f\n", orig_qtype, network_time);
-
-    switch (orig_qtype) {
-    case TYPE_A:
-    case TYPE_AAAA:
-      {
-	CNTS.A_T2R_min = CNTS.A_T2R_min == 0 ? t2r : min(CNTS.A_T2R_min, t2r);
-	CNTS.A_T2R_max = max(CNTS.A_T2R_max, t2r);
-	CNTS.A_T2R_avg += t2r;
-	break;
-      }
-    case TYPE_CNAME:
-      {
-	CNTS.CNAME_T2R_min = CNTS.CNAME_T2R_min == 0 ? t2r : min(CNTS.CNAME_T2R_min, t2r);
-	CNTS.CNAME_T2R_max = max(CNTS.CNAME_T2R_max, t2r);
-	CNTS.CNAME_T2R_avg += t2r;
-	break;
-      }
-    case TYPE_ALL:
-      {
-	CNTS.ANY_T2R_min = CNTS.ANY_T2R_min == 0 ? t2r : min(CNTS.ANY_T2R_min, t2r);
-	CNTS.ANY_T2R_max = max(CNTS.ANY_T2R_max, t2r);
-	CNTS.ANY_T2R_avg += t2r;
-	break;
-      }
-    case TYPE_PTR:
-      {
-	CNTS.PTR_T2R_min = CNTS.PTR_T2R_min == 0 ? t2r : min(CNTS.PTR_T2R_min, t2r);
-	CNTS.PTR_T2R_max = max(CNTS.PTR_T2R_max, t2r);
-	CNTS.PTR_T2R_avg += t2r;
-	break;
-      }
-    default:
-      {
-	break;
-      }
-    }
-
-    if (do_details_redis && anchor_entry != 0) {
-
-      string orig_addr = analyzer->Conn()->OrigAddr().AsString();
-      const char* s_orig_addr = orig_addr.c_str();
-
-      char beacon[256];  
-      strcpy(beacon, (char*)name);
-      char* saveptr;
-      strtok_r(beacon, ".", &saveptr);
-      char* cust_data = strtok_r(NULL, ".", &saveptr);
-      char* cust_id = strtok_r(NULL, ".", &saveptr);
-
-      char redis_cmd[256];
-#if PUBLISH_REALTIME
-      sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id, cust_data);
-      redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
-      freeReplyObject(reply);
-#else
-      // Add to event cache. Flushed when we dump per second stats
-      char* val = (char*)malloc(256);
-      sprintf(val, "%f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id,cust_data);
-      PWord_t PV = NULL;
-      ++EVENT_COUNT;
-      // JLI(PV, EVENT_CACHE, EVENT_COUNT);
-      JError_t J_Error;
-      if (((PV) = (PWord_t)JudyLIns(&EVENT_CACHE, EVENT_COUNT, &J_Error)) == PJERR) {
-	J_E("JudyLIns", &J_Error);
-      }
-      *PV = (Word_t)val;
-#endif
-
-    }
-
-    if (do_details_statsd && anchor_entry != 0) {
-
-      string orig_addr = analyzer->Conn()->OrigAddr().AsString();
-      const char* s_orig_addr = orig_addr.c_str();
-
-      char log_line[256];
-      char beacon[256];
-      strcpy(beacon, (char*)name);
-      char* saveptr;
-      strtok_r(beacon, ".", &saveptr);
-      char* cust_id = strtok_r(NULL, ".", &saveptr);
-      sprintf(log_line, "%f,D,%s,%s,%s,", network_time,s_orig_addr,beacon,cust_id);
-
-      char pkt[PKT_LEN];
-      statsd_prepare(STATSD_LINK, log_line, 1, "kv", 1, pkt, MAX_LINE_LEN, 1);
-      statsd_send(STATSD_LINK, pkt);
-
-    }
-    else if (do_details_all || (do_details && do_zone_details)) {
-
-      ++CNTS.logged;
-      ++TOTALS.logged;
-      if (custom_stats)
-	++custom_stats->logged;
+	  ++custom_stats->request;
+	  custom_stats->qlen += qlen;
+	}	
       
+	if (analyzer->Conn()->ConnTransport() == TRANSPORT_TCP) {
+	  ++CNTS.TCP;
+	  ++TOTALS.TCP;
+	  if (custom_stats) ++custom_stats->TCP;
+	} else {
+	  // Not really true :-(
+	  ++CNTS.UDP;
+	  ++TOTALS.UDP;
+	  if (custom_stats) ++custom_stats->UDP;
+	}
+      
+	if (analyzer->Conn()->GetOrigFlowLabel() == 0) {
+	  ++CNTS.V4;
+	  ++TOTALS.V4;
+	  if (custom_stats) ++custom_stats->V4;
+	} else {
+	  ++CNTS.V6;
+	  ++TOTALS.V6;
+	  if (custom_stats) ++custom_stats->V4;
+	}
+
+	switch (msg->opcode) 
+	  {
+	  case DNS_OP_QUERY:
+	    ++CNTS.OpQuery;
+	    ++TOTALS.OpQuery;
+	    if (custom_stats) ++custom_stats->OpQuery;
+	    break;
+	  case DNS_OP_IQUERY:
+	    ++CNTS.OpIQuery;
+	    ++TOTALS.OpIQuery;
+	    if (custom_stats) ++custom_stats->OpIQuery;
+	    break;
+	  case DNS_OP_SERVER_STATUS:
+	    ++CNTS.OpStatus;
+	    ++TOTALS.OpStatus;
+	    if (custom_stats) ++custom_stats->OpStatus;
+	    break;
+	  case 4:
+	    ++CNTS.OpNotify;
+	    ++TOTALS.OpNotify;
+	    if (custom_stats) ++custom_stats->OpNotify;
+	    break;
+	  case 5:
+	    ++CNTS.OpUpdate;
+	    ++TOTALS.OpUpdate;
+	    if (custom_stats) ++custom_stats->OpUpdate;
+	    break;
+	  default:
+	    ++CNTS.OpUnassigned;
+	    ++TOTALS.OpUnassigned;
+	    if (custom_stats) ++custom_stats->OpUnassigned;
+	    break;
+	  }
+	if (msg->RD) {
+	  ++CNTS.RD;
+	  ++TOTALS.RD;
+	  if (custom_stats) ++custom_stats->RD;
+	}
+      } else {
+	if (custom_stats) {
+	  custom_stats->rlen += rlen;
+	}	
+      }
+    }
+
+    if (local_do_owner_stats && is_query) {
+      // NOTE: The owner_id may the actual zone's ... or the OTHER owner id (0)
+      HashKey* key = new HashKey(owner_id);
+      owner_stats = OWNER_INFO.Lookup(key);
+      if (owner_stats == 0) {
+	// We don't even have an OTHER stats collector yet, create one
+	owner_stats = new OwnerStats();
+	owner_stats->id = 0;
+	owner_stats->cnt = 0;
+	OWNER_INFO.Insert(key, owner_stats);
+      }
+      ++owner_stats->cnt;
+      delete key;
+    }
+
+    if (local_do_counts && !zone_stats) {
+    
+      ++CNTS.zones;
+      if (custom_stats) 
+	++custom_stats->zones;
+      zone_stats = new ZoneStats();
+      zone_stats->cnt = 0;
+    
+      if (anchor_entry) {
+	// An anchor point that  we know about
+	strcpy(zone_stats->key, tlz);
+	zone_stats->zone_id = anchor_entry->zone_id;
+	zone_stats->owner_id = anchor_entry->owner_id;
+      } else {
+	// OTHER bucket for now
+	strcpy(zone_stats->key, "?");
+	zone_stats->zone_id = 0;
+	zone_stats->owner_id = 0;
+      }
+      telemetry_zone_stats.Insert(zone_hash, zone_stats);
+    }
+
+    QnameStats* qname_stat = 0;
+
+    if (is_query && local_do_qname_stats && dns_telemetry_qname_info) {
+      if (anchor_entry) {
+	HashKey* filter_key = new HashKey((bro_int_t)anchor_entry->zone_id);
+	QnameFilter* filter = QNAME_FILTERS.Lookup(filter_key);
+	if (filter && filter->enabled) {
+	  char qname_key[256];
+	  sprintf(qname_key, "%s", name);
+	  HashKey* qname_hash = new HashKey(qname_key);
+	  qname_stat = telemetry_qname_stats.Lookup(qname_hash);
+	  if (!qname_stat) {
+	    qname_stat = new QnameStats();
+	    qname_stat->cnt = 0;
+	    telemetry_qname_stats.Insert(qname_hash, qname_stat);
+	  } else {
+	    ++qname_stat->cnt;
+	  }
+	  delete qname_hash;
+	  qname_stat->zone_id = anchor_entry->zone_id;
+	  qname_stat->owner_id = anchor_entry->owner_id;
+	}
+	delete filter_key;
+	local_do_qname_stats = qname_stat != NULL;
+      } else {
+	// fprintf(stderr, "ERROR: No anchor entry! name=%s tlz=%s\n", name, tlz);
+	local_do_qname_stats = false;
+      }
+    }
+
+    if ( msg->QR == 0 ) {
+
+      dns_event = dns_telemetry_request;
+
+      RR_Type qtype = RR_Type(ExtractShort(data, len));
+      msg->qtype = qtype;
+    
+      if (local_do_zone_stats) {
+	++zone_stats->cnt;
+	if (msg->RD) {
+	  ++zone_stats->RD;
+	}
+      }
+	
+      const IPAddr& resp_addr = analyzer->Conn()->RespAddr();
+      string sAddrResp = resp_addr.AsString();
+      const char* sAddrResp_cstr = sAddrResp.c_str();
+
+      // fprintf(stderr, "QUERY|ORIG: %s RESP: %s id=%d qtype=%u %f\n", s_orig_addr_cstr, sAddrResp_cstr, msg->id, msg->qtype, network_time);
+
+      if (is_query) {
+	// Remember the client's IP. Use the message transaction id as the temporary key. 
+	// There is chance of a small/probablistic chance of collision. See BRO transaction id comments in their source code.
+	HashKey* client_hash = new HashKey((uint32)msg->id);
+	QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
+	if (query_client) {
+	  query_client->start = network_time;
+	  query_client->qtype = msg->qtype;
+	} else {
+	  query_client = new QueryClient();
+	  query_client->start = network_time;
+	  query_client->qtype = msg->qtype;
+	  QUERY_CLIENTS.Insert(client_hash, query_client);
+	}
+	delete client_hash;
+      }
+
+      if (is_query && do_client_stats) {
+
+	HashKey* client_hash = new HashKey(s_orig_addr);
+	int* client_idx = telemetry_client_stats.Lookup(client_hash);
+	if (client_idx) {
+	  ++(*client_idx);
+	} else {
+	  telemetry_client_stats.Insert(client_hash, new int(1));
+	  if (local_do_counts) {
+	    ++CNTS.clients;
+	  }
+	  ++TOTALS.clients;
+	  if (custom_stats) {
+	    ++custom_stats->clients;
+	  }
+	}
+	delete client_hash;
+      }
+
+      if (local_do_counts) {
+	switch (qtype) 
+	  {
+	  case TYPE_A:
+	    // fprintf(stderr, "QUERY|qtype=%u %f\n", qtype, network_time);
+	    ++CNTS.A;
+	    ++TOTALS.A;
+	    if (custom_stats) 
+	      ++custom_stats->A;
+	    if (local_do_qname_stats)
+	      ++qname_stat->A;
+	    if (do_zone_stats)
+	      ++zone_stats->A;
+	    break;
+	  case TYPE_NS:
+	    ++CNTS.NS;
+	    ++TOTALS.NS;
+	    if (custom_stats) 
+	      ++custom_stats->NS;
+	    if (local_do_qname_stats)
+	      ++qname_stat->NS;
+	    if (do_zone_stats)
+	      ++zone_stats->NS;
+	    break;
+	  case TYPE_CNAME:
+	    ++CNTS.CNAME;
+	    ++TOTALS.CNAME;
+	    if (custom_stats) 
+	      ++custom_stats->CNAME;
+	    if (local_do_qname_stats)
+	      ++qname_stat->CNAME;
+	    if (do_zone_stats)
+	      ++zone_stats->CNAME;
+	    break;
+	  case TYPE_SOA:
+	    ++CNTS.SOA;
+	    ++TOTALS.SOA;
+	    if (custom_stats) 
+	      ++custom_stats->SOA;
+	    if (local_do_qname_stats)
+	      ++qname_stat->SOA;
+	    if (do_zone_stats)
+	      ++zone_stats->SOA;
+	    break;
+	  case TYPE_PTR:
+	    ++CNTS.PTR;
+	    ++TOTALS.PTR;
+	    if (custom_stats) 
+	      ++custom_stats->PTR;
+	    if (local_do_qname_stats)
+	      ++qname_stat->PTR;
+	    if (do_zone_stats)
+	      ++zone_stats->PTR;
+	    break;
+	  case TYPE_MX:
+	    ++CNTS.MX;
+	    ++TOTALS.MX;
+	    if (custom_stats) 
+	      ++custom_stats->MX;
+	    if (local_do_qname_stats)
+	      ++qname_stat->MX;
+	    if (do_zone_stats)
+	      ++zone_stats->MX;
+	    break;
+	  case TYPE_TXT:
+	    ++CNTS.TXT;
+	    ++TOTALS.TXT;
+	    if (custom_stats) 
+	      ++custom_stats->TXT;
+	    if (local_do_qname_stats)
+	      ++qname_stat->TXT;
+	    if (do_zone_stats)
+	      ++zone_stats->TXT;
+	    break;
+	  case TYPE_AAAA:
+	    ++CNTS.AAAA;
+	    ++TOTALS.AAAA;
+	    if (custom_stats) 
+	      ++custom_stats->AAAA;
+	    if (local_do_qname_stats)
+	      ++qname_stat->AAAA;
+	    if (do_zone_stats)
+	      ++zone_stats->AAAA;
+	    break;
+	  case TYPE_SRV:
+	    ++CNTS.SRV;
+	    ++TOTALS.SRV;
+	    if (custom_stats) 
+	      ++custom_stats->SRV;
+	    if (local_do_qname_stats)
+	      ++qname_stat->SRV;
+	    if (do_zone_stats)
+	      ++zone_stats->SRV;
+	    break;
+	  case TYPE_ALL:
+	    ++CNTS.ANY;
+	    ++TOTALS.ANY;
+	    if (custom_stats) 
+	      ++custom_stats->ANY;
+	    if (local_do_qname_stats)
+	      ++qname_stat->other;
+	    if (do_zone_stats)
+	      ++zone_stats->other;
+	    if (msg->RD) {
+	      ++CNTS.ANY_RD;
+	      ++TOTALS.ANY_RD;
+	      if (custom_stats) 
+		++custom_stats->RD;
+
+	      if (do_anyrd_stats) {
+		char anyrd_key[560];
+		sprintf(anyrd_key, "%s|%s", s_orig_addr, name);
+		HashKey* anyrd_hash = new HashKey(anyrd_key);
+		// fprintf(stderr, "ANYRD key=%s len=%u hash_key=%s key_size=%d\n", anyrd_key, (unsigned int)strlen(anyrd_key), (const char*)anyrd_hash->Key(), anyrd_hash->Size());
+		int* count_idx = telemetry_anyrd_counts.Lookup(anyrd_hash);
+		if (count_idx) {
+		  ++(*count_idx);
+		} else {
+		  telemetry_anyrd_counts.Insert(anyrd_hash, new int(1));
+		}
+		delete anyrd_hash;
+	      }
+
+	    }
+	    break;
+	  default:
+	    ++CNTS.other;
+	    ++TOTALS.other;
+	    if (custom_stats) 
+	      ++custom_stats->other;
+	    if (local_do_qname_stats)
+	      ++qname_stat->other;
+	    if (do_zone_stats)
+	      ++zone_stats->other;
+	    break;
+	  }
+      }
+    }
+    else if ( msg->QR == 1 &&  msg->ancount == 0 && msg->nscount == 0 && msg->arcount == 0 ) {
+      // Service rejected in some fashion, and it won't be reported
+      // via a returned RR because there aren't any.
+      dns_event = dns_telemetry_rejected;
+      if (local_do_counts) {
+	++CNTS.rejected;
+	++CNTS.rcode_refused;
+	++TOTALS.rejected;
+	++TOTALS.rcode_refused;
+	if (custom_stats) {
+	  ++custom_stats->rejected;
+	  ++custom_stats->rcode_refused;
+	}
+      }
+
       string resp_addr = analyzer->Conn()->RespAddr().AsString();
       const char* s_resp_addr = resp_addr.c_str();
 
-      string orig_addr = analyzer->Conn()->OrigAddr().AsString();
-      const char* s_orig_addr = orig_addr.c_str();
-      // fprintf(stderr, "REPLY|ORIG: %s RESP: %s id=%d qtype=%u rcode=%u %f %f t2r=%u\n", s_orig_addr, s_resp_addr, msg->id, orig_qtype, msg->rcode, network_time, start_time, t2r);
+      HashKey* client_hash = new HashKey((uint32)msg->id);
+      QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
+      double start_time = 0;
+      uint orig_qtype = 0;
+      if (query_client) {
+	start_time = query_client->start;
+	orig_qtype = query_client->qtype;
+	// TODO: Delete? Do we care. If we overlap on a 32bit int we're just eating memory
+      }
+      delete client_hash;
+      uint t2r = (network_time - start_time)*1000000; // As unsigned micro seconds!
 
-      char log_line[256];
-      sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u\n", network_time,(char*)name,orig_qtype,msg->rcode,msg->ttl,s_orig_addr,s_resp_addr,msg->opcode);
-      uint len = strlen(log_line);
+      CNTS.T2R_min = CNTS.T2R_min == 0 ? t2r : min(CNTS.T2R_min, t2r);
+      CNTS.T2R_max = max(CNTS.T2R_max, t2r);
+      CNTS.T2R_avg += t2r;
 
-      // fprintf(stderr, "%s", log_line);
+      // fprintf(stderr, "..ORIG qtype=%u A T2R %f\n", orig_qtype, network_time);
 
-      // Determine which logger we should use
-      DetailLogInfo* logger = 0;
-      if (anchor_entry != 0 && anchor_entry->log_id != 0) {
-
-	if (!do_details_all) {
-	  HashKey* log_key = new HashKey((bro_int_t)anchor_entry->zone_id);
-	  logger = DETAIL_LOGGER_INFO.Lookup(log_key);
-	  
-	  if (logger == 0) {
-	    fprintf(stderr, "WARN: Unexpected lack of DetailLogInfo config zone_id=%d owner_id=%d log_id=%d\n", anchor_entry->zone_id, anchor_entry->owner_id, anchor_entry->log_id);
-	    // Create new logger
-	    logger = new DetailLogInfo();
-	    logger->owner_id = anchor_entry->owner_id;
-	    logger->log_id = anchor_entry->log_id;
-	    logger->ts = network_time;
-	    logger->enabled = true;
-	    logger->buflen = 0;
-	    logger->bufcnt = 0;
-	    // Use the base multi-tenant logger's root
-	    logger->fname = DETAIL_DEFAULT_PATH;
-	    DETAIL_LOGGER_INFO.Insert(log_key, logger);
-	  }
-	  delete log_key;
-
-	  // Switch to using the common logger if that's what's configured
-	  if (logger->log_id == 3) {
-	    // fprintf(stderr, "using common logger\n");
-	    logger = NULL;
-	  }
+      switch (orig_qtype) {
+      case TYPE_A:
+      case TYPE_AAAA:
+	{
+	  CNTS.A_T2R_min = CNTS.A_T2R_min == 0 ? t2r : min(CNTS.A_T2R_min, t2r);
+	  CNTS.A_T2R_max = max(CNTS.A_T2R_max, t2r);
+	  CNTS.A_T2R_avg += t2r;
+	  break;
 	}
-	  
-	if (logger == NULL) {
-	  // Default to multi-tenant logger
-	  HashKey* log_key = new HashKey((bro_int_t)0);
-	  logger = DETAIL_LOGGER_INFO.Lookup(log_key);
-	  delete log_key;
+      case TYPE_CNAME:
+	{
+	  CNTS.CNAME_T2R_min = CNTS.CNAME_T2R_min == 0 ? t2r : min(CNTS.CNAME_T2R_min, t2r);
+	  CNTS.CNAME_T2R_max = max(CNTS.CNAME_T2R_max, t2r);
+	  CNTS.CNAME_T2R_avg += t2r;
+	  break;
 	}
-	
-	if (logger->file == NULL) {
-	  static char source_fname[256];
-	  static char* root_fname = logger->fname;
-	
-	  // sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
+      case TYPE_ALL:
+	{
+	  CNTS.ANY_T2R_min = CNTS.ANY_T2R_min == 0 ? t2r : min(CNTS.ANY_T2R_min, t2r);
+	  CNTS.ANY_T2R_max = max(CNTS.ANY_T2R_max, t2r);
+	  CNTS.ANY_T2R_avg += t2r;
+	  break;
+	}
+      case TYPE_PTR:
+	{
+	  CNTS.PTR_T2R_min = CNTS.PTR_T2R_min == 0 ? t2r : min(CNTS.PTR_T2R_min, t2r);
+	  CNTS.PTR_T2R_max = max(CNTS.PTR_T2R_max, t2r);
+	  CNTS.PTR_T2R_avg += t2r;
+	  break;
+	}
+      default:
+	{
+	  break;
+	}
+      }
+      if (local_do_zone_stats)
+	++zone_stats->REFUSED;
+    } else {
 
-	  switch (logger->log_id) 
-	    {
-	    case LOGGER_ZONE_MANY:
-	      {
-		// Multi Zone
-		sprintf(source_fname, "%s-O-%08d.log", root_fname, logger->owner_id);
-		break;
-	      }
-	    case LOGGER_ZONE_ONLY:
-	      {
-		// Single Zone
-		sprintf(source_fname, "%s-Z-%08d.log", root_fname, logger->zone_id);
-		break;
-	      }
-	    case LOGGER_ZONE_ALL:
-	      {
-		// Common
-		sprintf(source_fname, "%s-00000000.log", root_fname);
-		break;
-	      }
-	    default:
-	      {
-		fprintf(stderr, "ERROR: Unexpected logid=%d name=%s tlz=%s\n", logger->log_id, name, tlz);
-		break;
-	      }
+      // A REPLY. We don't do details until we've received the reply because of what we want to includes as part of that.
+      dns_event = dns_telemetry_query_reply;
+
+      HashKey* client_hash = new HashKey((uint32)msg->id);
+      QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
+      double start_time = 0;
+      uint orig_qtype = 0;
+      if (query_client) {
+	start_time = query_client->start;
+	orig_qtype = query_client->qtype;
+	// TODO: Delete? Do we care. If we overlap on a 32bit int we're just eating memory
+      }
+      delete client_hash;
+      uint t2r = (network_time - start_time)*1000000; // As unsigned micro seconds!
+    
+      CNTS.T2R_min = CNTS.T2R_min == 0 ? t2r : min(CNTS.T2R_min, t2r);
+      CNTS.T2R_max = max(CNTS.T2R_max, t2r);
+      CNTS.T2R_avg += t2r;
+    
+      if (msg->rcode == DNS_CODE_NAME_ERR) {
+	CNTS.NX_T2R_min = CNTS.NX_T2R_min == 0 ? t2r : min(CNTS.NX_T2R_min, t2r);
+	CNTS.NX_T2R_max = max(CNTS.NX_T2R_max, t2r);
+	CNTS.NX_T2R_avg += t2r;
+      }
+
+      // fprintf(stderr, "..ORIG qtype=%u A T2R %f\n", orig_qtype, network_time);
+
+      switch (orig_qtype) {
+      case TYPE_A:
+      case TYPE_AAAA:
+	{
+	  CNTS.A_T2R_min = CNTS.A_T2R_min == 0 ? t2r : min(CNTS.A_T2R_min, t2r);
+	  CNTS.A_T2R_max = max(CNTS.A_T2R_max, t2r);
+	  CNTS.A_T2R_avg += t2r;
+	  break;
+	}
+      case TYPE_CNAME:
+	{
+	  CNTS.CNAME_T2R_min = CNTS.CNAME_T2R_min == 0 ? t2r : min(CNTS.CNAME_T2R_min, t2r);
+	  CNTS.CNAME_T2R_max = max(CNTS.CNAME_T2R_max, t2r);
+	  CNTS.CNAME_T2R_avg += t2r;
+	  break;
+	}
+      case TYPE_ALL:
+	{
+	  CNTS.ANY_T2R_min = CNTS.ANY_T2R_min == 0 ? t2r : min(CNTS.ANY_T2R_min, t2r);
+	  CNTS.ANY_T2R_max = max(CNTS.ANY_T2R_max, t2r);
+	  CNTS.ANY_T2R_avg += t2r;
+	  break;
+	}
+      case TYPE_PTR:
+	{
+	  CNTS.PTR_T2R_min = CNTS.PTR_T2R_min == 0 ? t2r : min(CNTS.PTR_T2R_min, t2r);
+	  CNTS.PTR_T2R_max = max(CNTS.PTR_T2R_max, t2r);
+	  CNTS.PTR_T2R_avg += t2r;
+	  break;
+	}
+      default:
+	{
+	  break;
+	}
+      }
+
+      if (do_details_redis && anchor_entry != 0) {
+
+	if (strstr(s_orig_addr, "10.") != NULL) {
+	  char beacon[256];  
+	  strcpy(beacon, (char*)name);
+	  char* saveptr;
+	  strtok_r(beacon, ".", &saveptr);
+	  char* cust_data = strtok_r(NULL, ".", &saveptr);
+	  char* cust_id = strtok_r(NULL, ".", &saveptr);
+
+	  char redis_cmd[256];
+#if PUBLISH_REALTIME
+	  sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id, cust_data);
+	  redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
+	  freeReplyObject(reply);
+#else
+	  // Add to event cache. Flushed when we dump per second stats
+	  char* val = (char*)malloc(256);
+	  sprintf(val, "%f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id,cust_data);
+	  PWord_t PV = NULL;
+	  ++EVENT_COUNT;
+	  // fprintf(stderr, "%s %lu\n", val, EVENT_COUNT);
+	  JError_t J_Error;
+	  if (((PV) = (PWord_t)JudyLIns(&EVENT_CACHE, EVENT_COUNT, &J_Error)) == PJERR) {
+	    J_E("JudyLIns", &J_Error);
+	  }
+	  *PV = (Word_t)val;
+#endif
+	}
+      }
+
+      if (do_details_statsd && anchor_entry != 0) {
+
+	char log_line[256];
+	char beacon[256];
+	strcpy(beacon, (char*)name);
+	char* saveptr;
+	strtok_r(beacon, ".", &saveptr);
+	char* cust_id = strtok_r(NULL, ".", &saveptr);
+	sprintf(log_line, "%f,D,%s,%s,%s,", network_time,s_orig_addr,beacon,cust_id);
+
+	char pkt[PKT_LEN];
+	statsd_prepare(STATSD_LINK, log_line, 1, "kv", 1, pkt, MAX_LINE_LEN, 1);
+	statsd_send(STATSD_LINK, pkt);
+
+      }
+      else if (do_details_all || (do_details && do_zone_details)) {
+
+	++CNTS.logged;
+	++TOTALS.logged;
+	if (custom_stats)
+	  ++custom_stats->logged;
+      
+	string resp_addr = analyzer->Conn()->RespAddr().AsString();
+	const char* s_resp_addr = resp_addr.c_str();
+
+	string orig_addr = analyzer->Conn()->OrigAddr().AsString();
+	const char* s_orig_addr = orig_addr.c_str();
+	// fprintf(stderr, "REPLY|ORIG: %s RESP: %s id=%d qtype=%u rcode=%u %f %f t2r=%u\n", s_orig_addr, s_resp_addr, msg->id, orig_qtype, msg->rcode, network_time, start_time, t2r);
+
+	char log_line[256];
+	sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u\n", network_time,(char*)name,orig_qtype,msg->rcode,msg->ttl,s_orig_addr,s_resp_addr,msg->opcode);
+	uint len = strlen(log_line);
+
+	// fprintf(stderr, "%s", log_line);
+
+	// Determine which logger we should use
+	DetailLogInfo* logger = 0;
+	if (anchor_entry != 0 && anchor_entry->log_id != 0) {
+
+	  if (!do_details_all) {
+	    HashKey* log_key = new HashKey((bro_int_t)anchor_entry->zone_id);
+	    logger = DETAIL_LOGGER_INFO.Lookup(log_key);
+	  
+	    if (logger == 0) {
+	      fprintf(stderr, "WARN: Unexpected lack of DetailLogInfo config zone_id=%d owner_id=%d log_id=%d\n", anchor_entry->zone_id, anchor_entry->owner_id, anchor_entry->log_id);
+	      // Create new logger
+	      logger = new DetailLogInfo();
+	      logger->owner_id = anchor_entry->owner_id;
+	      logger->log_id = anchor_entry->log_id;
+	      logger->ts = network_time;
+	      logger->enabled = true;
+	      logger->buflen = 0;
+	      logger->bufcnt = 0;
+	      // Use the base multi-tenant logger's root
+	      logger->fname = DETAIL_DEFAULT_PATH;
+	      DETAIL_LOGGER_INFO.Insert(log_key, logger);
 	    }
+	    delete log_key;
 
-	  if (logger->log_id == LOGGER_ZONE_MANY) {
-	    // Determine if we've got an open logger for the source name. If so, use that.
-	    HashKey* open_logger_key = new HashKey(source_fname);
-	    DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
-	    if (open_logger) {
-	      // fprintf(stderr, "Using existing logger %s logid=%d owner=%d my_zone=%d other_zone=%d\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, open_logger->zone_id);
-	      logger->file = open_logger->file;
-	      logger->raw_file = open_logger->raw_file;
+	    // Switch to using the common logger if that's what's configured
+	    if (logger->log_id == 3) {
+	      // fprintf(stderr, "using common logger\n");
+	      logger = NULL;
+	    }
+	  }
+	  
+	  if (logger == NULL) {
+	    // Default to multi-tenant logger
+	    HashKey* log_key = new HashKey((bro_int_t)0);
+	    logger = DETAIL_LOGGER_INFO.Lookup(log_key);
+	    delete log_key;
+	  }
+	
+	  if (logger->file == NULL) {
+	    static char source_fname[256];
+	    static char* root_fname = logger->fname;
+	
+	    // sprintf(source_fname, "%s-%08d.log", root_fname, logger->owner_id);
+
+	    switch (logger->log_id) 
+	      {
+	      case LOGGER_ZONE_MANY:
+		{
+		  // Multi Zone
+		  sprintf(source_fname, "%s-O-%08d.log", root_fname, logger->owner_id);
+		  break;
+		}
+	      case LOGGER_ZONE_ONLY:
+		{
+		  // Single Zone
+		  sprintf(source_fname, "%s-Z-%08d.log", root_fname, logger->zone_id);
+		  break;
+		}
+	      case LOGGER_ZONE_ALL:
+		{
+		  // Common
+		  sprintf(source_fname, "%s-00000000.log", root_fname);
+		  break;
+		}
+	      default:
+		{
+		  fprintf(stderr, "ERROR: Unexpected logid=%d name=%s tlz=%s\n", logger->log_id, name, tlz);
+		  break;
+		}
+	      }
+
+	    if (logger->log_id == LOGGER_ZONE_MANY) {
+	      // Determine if we've got an open logger for the source name. If so, use that.
+	      HashKey* open_logger_key = new HashKey(source_fname);
+	      DetailLogInfo* open_logger = DETAIL_LOGGER_OPEN.Lookup(open_logger_key);
+	      if (open_logger) {
+		// fprintf(stderr, "Using existing logger %s logid=%d owner=%d my_zone=%d other_zone=%d\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, open_logger->zone_id);
+		logger->file = open_logger->file;
+		logger->raw_file = open_logger->raw_file;
+	      } else {
+		FILE* f = fopen(source_fname, "wb");
+		logger->file = new BroFile(f, source_fname, "wb");
+		logger->raw_file = f;
+		DETAIL_LOGGER_OPEN.Insert(open_logger_key, logger);
+		// fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
+	      }
+	      delete open_logger_key;
+
 	    } else {
 	      FILE* f = fopen(source_fname, "wb");
 	      logger->file = new BroFile(f, source_fname, "wb");
 	      logger->raw_file = f;
-	      DETAIL_LOGGER_OPEN.Insert(open_logger_key, logger);
-	      // fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
-	    }
-	    delete open_logger_key;
-
-	  } else {
-	    FILE* f = fopen(source_fname, "wb");
-	    logger->file = new BroFile(f, source_fname, "wb");
-	    logger->raw_file = f;
 #ifdef ROTATE_LOGGING
-	    fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
+	      fprintf(stderr, "Creating logger %s logid=%d owner=%d zone=%d file=%p\n", source_fname, logger->log_id, logger->owner_id, logger->zone_id, logger->file);
 #endif
+	    }
 	  }
-	}
 
-	if (logger->buflen + len > MAX_LOG_BUFFER) {
-	  logger->file->Write(logger->buffer, logger->buflen);
-	  logger->buflen = 0;
-	  logger->bufcnt = 0;
+	  if (logger->buflen + len > MAX_LOG_BUFFER) {
+	    logger->file->Write(logger->buffer, logger->buflen);
+	    logger->buflen = 0;
+	    logger->bufcnt = 0;
+	  }
+	  memcpy(logger->buffer + logger->buflen, log_line, len);
+	  logger->buflen += len;
+	  ++logger->bufcnt;
 	}
-	memcpy(logger->buffer + logger->buflen, log_line, len);
-	logger->buflen += len;
-	++logger->bufcnt;
+      }
+
+      if (local_do_counts) {
+
+	switch (msg->rcode) 
+	  {
+	  case DNS_CODE_OK: {
+	    ++CNTS.rcode_noerror;
+	    ++CNTS.reply;
+	    ++TOTALS.reply;
+	    ++TOTALS.rcode_noerror;
+	    if (custom_stats) {
+	      ++custom_stats->rcode_noerror;
+	      ++custom_stats->reply;
+	    }
+	    if (do_zone_stats) {
+	      ++zone_stats->NOERROR;
+	    }
+	    break;
+	  }
+	  case DNS_CODE_FORMAT_ERR:
+	    ++CNTS.rcode_format_err;
+	    ++TOTALS.rcode_format_err;
+	    if (custom_stats) 
+	      ++custom_stats->rcode_format_err;
+	    break;
+	  case DNS_CODE_SERVER_FAIL:
+	    ++CNTS.rcode_server_fail;
+	    ++TOTALS.rcode_server_fail;
+	    if (custom_stats) 
+	      ++custom_stats->rcode_server_fail;
+	    break;
+	  case DNS_CODE_NAME_ERR:
+	    ++CNTS.rcode_nxdomain;
+	    ++TOTALS.rcode_nxdomain;
+	    if (custom_stats) 
+	      ++custom_stats->rcode_nxdomain;
+	    if (do_zone_stats)
+	      ++zone_stats->NXDOMAIN;
+	    break;
+	  case DNS_CODE_NOT_IMPL:
+	    ++CNTS.rcode_not_impl;
+	    ++TOTALS.rcode_not_impl;
+	    if (custom_stats) 
+	      ++custom_stats->rcode_not_impl;
+	    break;
+	  case DNS_CODE_REFUSED:
+	    ++CNTS.rejected;
+	    ++CNTS.rcode_refused;
+	    ++TOTALS.rcode_refused;
+	    ++TOTALS.rejected;
+	    if (custom_stats) {
+	      ++custom_stats->rcode_refused;
+	      ++custom_stats->rejected;
+	    }
+	    if (do_zone_stats)
+	      ++zone_stats->REFUSED;
+	    break;
+	  }
       }
     }
-
-    if (local_do_counts) {
-
-      switch (msg->rcode) 
-	{
-	case DNS_CODE_OK: {
-	  ++CNTS.rcode_noerror;
-	  ++CNTS.reply;
-	  ++TOTALS.reply;
-	  ++TOTALS.rcode_noerror;
-	  if (custom_stats) {
-	    ++custom_stats->rcode_noerror;
-	    ++custom_stats->reply;
-	  }
-	  if (do_zone_stats) {
-	    ++zone_stats->NOERROR;
-	  }
-	  break;
-	}
-	case DNS_CODE_FORMAT_ERR:
-	  ++CNTS.rcode_format_err;
-	  ++TOTALS.rcode_format_err;
-	  if (custom_stats) 
-	    ++custom_stats->rcode_format_err;
-	  break;
-	case DNS_CODE_SERVER_FAIL:
-	  ++CNTS.rcode_server_fail;
-	  ++TOTALS.rcode_server_fail;
-	  if (custom_stats) 
-	    ++custom_stats->rcode_server_fail;
-	  break;
-	case DNS_CODE_NAME_ERR:
-	  ++CNTS.rcode_nxdomain;
-	  ++TOTALS.rcode_nxdomain;
-	  if (custom_stats) 
-	    ++custom_stats->rcode_nxdomain;
-	  if (do_zone_stats)
-	    ++zone_stats->NXDOMAIN;
-	  break;
-	case DNS_CODE_NOT_IMPL:
-	  ++CNTS.rcode_not_impl;
-	  ++TOTALS.rcode_not_impl;
-	  if (custom_stats) 
-	    ++custom_stats->rcode_not_impl;
-	  break;
-	case DNS_CODE_REFUSED:
-	  ++CNTS.rejected;
-	  ++CNTS.rcode_refused;
-	  ++TOTALS.rcode_refused;
-	  ++TOTALS.rejected;
-	  if (custom_stats) {
-	    ++custom_stats->rcode_refused;
-	    ++custom_stats->rejected;
-	  }
-	  if (do_zone_stats)
-	    ++zone_stats->REFUSED;
-	  break;
-	}
-    }
+    delete zone_hash;
   }
 
-  if ( dns_event && ! msg->skip_event )
-    {
-      BroString* question_name = new BroString(name, name_end - name, 1);
-      SendReplyOrRejectEvent(msg, dns_event, data, len, question_name);
-    }
-  else
-    {
-      // Consume the unused type/class.
-      (void) ExtractShort(data, len);
-      (void) ExtractShort(data, len);
-    }
+  // Consume the unused type/class.
+  (void) ExtractShort(data, len);
+  (void) ExtractShort(data, len);
 
-  delete zone_hash;
   return 1;
 }
 

@@ -330,6 +330,7 @@ Word_t  EVENT_TOTAL = 0;
 Word_t  EVENT_COUNT = 0;
 const char* EVENT_CHANNEL = "beacon";
 #define MAXVAL 32
+int     LAST_SUBSCRIBERS = 0;
 
 redisContext *REDIS = NULL;
 
@@ -349,6 +350,7 @@ static void redis_init() {
 }
 
 static void redis_term() {
+  fprintf(stderr, "Closing redis connection\n");
   if (REDIS != NULL) {
     redisFree(REDIS);
     REDIS = NULL;
@@ -2810,6 +2812,7 @@ void __dns_telemetry_fire_counts(double ts) {
 	// fprintf(stderr, "The index used %lu bytes of memory, total cache cost: %lu expected=%lu found=%lu total=%lu\n", index_size, (cache_count*MAXKEY)+index_size, delta, cache_count, EVENT_TOTAL);
 
 	redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+	LAST_SUBSCRIBERS = reply->integer;
 	freeReplyObject(reply);
 
       }
@@ -2817,9 +2820,26 @@ void __dns_telemetry_fire_counts(double ts) {
       // Simple heartbeat to keep the channel alive 
       if ((int)start % 30 == 0) {
 	char redis_cmd[256];
-	sprintf(redis_cmd, "PUBLISH beacon %f,A,%s,%s,%s", start,MY_NODE_ID,"127.0.0.0","DNS_PULSE");
+	sprintf(redis_cmd, "PUBLISH beacon %f,A,%s,%s,%s,SUBSCRIBERS=%d", start,MY_NODE_ID,"127.0.0.0","BRO_PULSE",LAST_SUBSCRIBERS);
 	redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
+	LAST_SUBSCRIBERS = reply->integer;
 	freeReplyObject(reply);
+      }
+
+      if ((int)start % 55 == 0) {
+	if (REDIS == NULL || REDIS->err) {
+	  redisFree(REDIS);
+	  REDIS = NULL;
+	}
+
+	struct timeval timeout = { 1, 500000 }; // 1.5 seconds
+	REDIS = redisConnectWithTimeout("127.0.0.1", 6379, timeout);
+	if (REDIS != NULL && REDIS->err) {
+	  fprintf(stderr, "Error renewing REDIS connection: %s\n", REDIS->errstr);
+	  redisFree(REDIS);
+	} else {
+	  // fprintf(stderr, "Renewed REDIS connection\n");
+	}
       }
 
     }

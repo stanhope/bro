@@ -2729,6 +2729,9 @@ void __dns_telemetry_fire_counts(double ts) {
     statsd_prepare(STATSD_LINK, (char*)"bro_ivcsw", delta_nivcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
 
+    statsd_prepare(STATSD_LINK, (char*)"bro_lag", lag, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
     statsd_prepare(STATSD_LINK, (char*)"dns_request", CNTS.request, (char*)"c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_reply", CNTS.reply, (char*)"c", 1.0, tmp, MAX_LINE_LEN, 1);
@@ -2741,6 +2744,8 @@ void __dns_telemetry_fire_counts(double ts) {
     strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_TCP", CNTS.TCP, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
+    statsd_prepare(STATSD_LINK, (char*)"dns_UDP", CNTS.UDP, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_noerror", CNTS.rcode_noerror, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_refused", CNTS.rcode_refused, "c", 1.0, tmp, MAX_LINE_LEN, 1);
@@ -2749,7 +2754,9 @@ void __dns_telemetry_fire_counts(double ts) {
     strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_T2R_max", CNTS.T2R_max, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
-    statsd_prepare(STATSD_LINK, (char*)"dns_T2R_avg", CNTS.T2R_avg, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+
+    uint avg = (CNTS.T2R_avg != 0 && CNTS.request != 0) ? CNTS.T2R_avg / CNTS.request : 0;
+    statsd_prepare(STATSD_LINK, (char*)"dns_T2R_avg", avg, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
     statsd_send(STATSD_LINK, pkt);
 

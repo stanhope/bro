@@ -296,7 +296,7 @@ int parseLine(char* line){
 }
     
 
-static int getValues(int* VIRT, int* RES, int* DATA, int* FD){
+static int getValues(int* VIRT, int* RES, int* DATA, int* FD, int* SHARE, int* PEAK){
   //Note: this value is in KB!
   FILE* file = fopen("/proc/self/status", "r");
   int result = -1;
@@ -312,6 +312,12 @@ static int getValues(int* VIRT, int* RES, int* DATA, int* FD){
     }
     else if (strncmp(line, "VmData:", 7) == 0){
       *DATA = parseLine(line);
+    }
+    else if (strncmp(line, "VmLib:", 6) == 0){
+      *SHARE = parseLine(line);
+    }
+    else if (strncmp(line, "VmPeak:", 7) == 0){
+      *PEAK = parseLine(line);
     }
     else if (strncmp(line, "FDSize:", 7) == 0){
       *FD = parseLine(line);
@@ -2642,8 +2648,8 @@ void __dns_telemetry_fire_counts(double ts) {
     char tmp[MAX_LINE_LEN];
     pkt[0]=0;
 
-    int self_VIRT = 0, self_RES = 0, self_DATA = 0, self_FD = 0;
-    getValues(&self_VIRT, &self_RES, &self_DATA, &self_FD);
+    int self_VIRT = 0, self_RES = 0, self_DATA = 0, self_SHARE = 0, self_FD = 0, self_PEAK = 0;
+    getValues(&self_VIRT, &self_RES, &self_DATA, &self_FD, &self_SHARE, &self_PEAK);
 
     struct rusage self_usage;
     getrusage(RUSAGE_SELF, &self_usage);
@@ -2699,6 +2705,12 @@ void __dns_telemetry_fire_counts(double ts) {
     statsd_prepare(STATSD_LINK, (char*)"bro_mem_dat", self_DATA, "g", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
 
+    statsd_prepare(STATSD_LINK, (char*)"bro_mem_shr", self_SHARE, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_mem_peak", self_PEAK, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
     statsd_prepare(STATSD_LINK, (char*)"bro_fd", delta_fd, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
 
@@ -2729,7 +2741,7 @@ void __dns_telemetry_fire_counts(double ts) {
     statsd_prepare(STATSD_LINK, (char*)"bro_ivcsw", delta_nivcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
 
-    statsd_prepare(STATSD_LINK, (char*)"bro_lag", lag, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    statsd_prepare(STATSD_LINK, (char*)"bro_lag", (int)(lag*1000000), "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
 
     statsd_prepare(STATSD_LINK, (char*)"dns_request", CNTS.request, (char*)"c", 1.0, tmp, MAX_LINE_LEN, 1);

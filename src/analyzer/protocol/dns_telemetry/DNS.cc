@@ -2648,98 +2648,96 @@ void __dns_telemetry_fire_counts(double ts) {
     char tmp[MAX_LINE_LEN];
     pkt[0]=0;
 
-    int self_VIRT = 0, self_RES = 0, self_DATA = 0, self_SHARE = 0, self_FD = 0, self_PEAK = 0;
-    getValues(&self_VIRT, &self_RES, &self_DATA, &self_FD, &self_SHARE, &self_PEAK);
-
-    struct rusage self_usage;
-    getrusage(RUSAGE_SELF, &self_usage);
-    double utime = self_usage.ru_utime.tv_sec + self_usage.ru_utime.tv_usec/1000000.0;
-    double stime = self_usage.ru_stime.tv_sec + self_usage.ru_stime.tv_usec/1000000.0;
-
-    // Calc delta since last interval for key per process metrics
-    double delta_utime = 100 * (utime - last_utime);
-    double delta_stime = 100 * (stime - last_stime);
-    double total_time = delta_utime + delta_stime;
-    long delta_nsignals = self_usage.ru_nsignals - last_signals;
-    long delta_inblock = self_usage.ru_inblock - last_inblock;
-    long delta_oublock = self_usage.ru_oublock - last_oublock;
-    long delta_nswap = self_usage.ru_nswap - last_nswap;
-    long delta_minflt = self_usage.ru_minflt - last_minflt;
-    long delta_majflt = self_usage.ru_majflt - last_majflt;
-    int delta_fd = self_FD - last_FD;
-    long delta_nvcsw = self_usage.ru_nvcsw - last_nvcsw;
-    long delta_nivcsw = self_usage.ru_nivcsw - last_nivcsw;
-
-    last_utime = utime;
-    last_stime = stime;
-    last_signals = self_usage.ru_nsignals;
-    last_minflt = self_usage.ru_minflt;
-    last_majflt = self_usage.ru_majflt;
-    last_inblock = self_usage.ru_inblock;
-    last_oublock = self_usage.ru_oublock;
-    last_nswap = self_usage.ru_nswap;
-    last_FD = self_FD;
-    last_nvcsw = self_usage.ru_nvcsw;
-    last_nivcsw = self_usage.ru_nivcsw;
-
-#if 0
-    fprintf(stderr, "cpu bro CPU%% (tot/usr/sys) %f/%f/%f MEM (VIRT/RES/DATA) %d/%d/%d fd=%d swap=%ld inblock=%ld oublock=%ld minflt=%ld majflt=%ld signals=%ld vcsw=%ld ivcsw=%ld\n\n", 
-	    total_time, delta_utime, delta_stime, self_VIRT, self_RES, self_DATA, delta_fd, delta_nswap, delta_inblock, delta_oublock, delta_minflt, delta_majflt, delta_nsignals, delta_nvcsw, delta_nivcsw);
-#endif
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_tot", total_time, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_sys", delta_stime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_usr", delta_utime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_mem_vrt", self_VIRT, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_mem_res", self_RES, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_mem_dat", self_DATA, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_mem_shr", self_SHARE, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_mem_peak", self_PEAK, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_fd", delta_fd, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_nswap", delta_nswap, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_minflt", delta_minflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_majflt", delta_majflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_inblock", delta_inblock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_oublock", delta_oublock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_signals", delta_nsignals, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_signals", delta_nsignals, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_vcsw", delta_nvcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-
-    statsd_prepare(STATSD_LINK, (char*)"bro_ivcsw", delta_nivcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
+    ////    int self_VIRT = 0, self_RES = 0, self_DATA = 0, self_SHARE = 0, self_FD = 0, self_PEAK = 0;
+    ////    getValues(&self_VIRT, &self_RES, &self_DATA, &self_FD, &self_SHARE, &self_PEAK);
+    ////    
+    ////    struct rusage self_usage;
+    ////    getrusage(RUSAGE_SELF, &self_usage);
+    ////    double utime = self_usage.ru_utime.tv_sec + self_usage.ru_utime.tv_usec/1000000.0;
+    ////    double stime = self_usage.ru_stime.tv_sec + self_usage.ru_stime.tv_usec/1000000.0;
+    ////    
+    ////    // Calc delta since last interval for key per process metrics
+    ////    double delta_utime = 100 * (utime - last_utime);
+    ////    double delta_stime = 100 * (stime - last_stime);
+    ////    double total_time = delta_utime + delta_stime;
+    ////    long delta_nsignals = self_usage.ru_nsignals - last_signals;
+    ////    long delta_inblock = self_usage.ru_inblock - last_inblock;
+    ////    long delta_oublock = self_usage.ru_oublock - last_oublock;
+    ////    long delta_nswap = self_usage.ru_nswap - last_nswap;
+    ////    long delta_minflt = self_usage.ru_minflt - last_minflt;
+    ////    long delta_majflt = self_usage.ru_majflt - last_majflt;
+    ////    int delta_fd = self_FD - last_FD;
+    ////    long delta_nvcsw = self_usage.ru_nvcsw - last_nvcsw;
+    ////    long delta_nivcsw = self_usage.ru_nivcsw - last_nivcsw;
+    ////    
+    ////    last_utime = utime;
+    ////    last_stime = stime;
+    ////    last_signals = self_usage.ru_nsignals;
+    ////    last_minflt = self_usage.ru_minflt;
+    ////    last_majflt = self_usage.ru_majflt;
+    ////    last_inblock = self_usage.ru_inblock;
+    ////    last_oublock = self_usage.ru_oublock;
+    ////    last_nswap = self_usage.ru_nswap;
+    ////    last_FD = self_FD;
+    ////    last_nvcsw = self_usage.ru_nvcsw;
+    ////    last_nivcsw = self_usage.ru_nivcsw;
+    ////    
+    ////    fprintf(stderr, "cpu bro CPU%% (tot/usr/sys) %f/%f/%f MEM (VIRT/RES/DATA) %d/%d/%d fd=%d swap=%ld inblock=%ld oublock=%ld minflt=%ld majflt=%ld signals=%ld vcsw=%ld ivcsw=%ld\n\n", 
+    ////	    total_time, delta_utime, delta_stime, self_VIRT, self_RES, self_DATA, delta_fd, delta_nswap, delta_inblock, delta_oublock, delta_minflt, delta_majflt, delta_nsignals, delta_nvcsw, delta_nivcsw);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_tot", total_time, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_sys", delta_stime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_usr", delta_utime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_vrt", self_VIRT, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_res", self_RES, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_dat", self_DATA, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_shr", self_SHARE, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_peak", self_PEAK, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_fd", delta_fd, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_nswap", delta_nswap, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_minflt", delta_minflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_majflt", delta_majflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_inblock", delta_inblock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_oublock", delta_oublock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_signals", delta_nsignals, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_signals", delta_nsignals, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_vcsw", delta_nvcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
+    ////
+    ////    statsd_prepare(STATSD_LINK, (char*)"bro_ivcsw", delta_nivcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    ////    strcat(pkt, tmp);
 
     statsd_prepare(STATSD_LINK, (char*)"bro_lag", (int)(lag*1000000), "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
@@ -2818,7 +2816,7 @@ void __dns_telemetry_fire_counts(double ts) {
 	  buffer[bufi] = 0;
 	  
 	  free((void*)val);
-	  // JLN(PV, EVENT_CACHE, Index);   // get next string
+
 	  JError_t J_Error;
 	  if (((PV) = (PWord_t)JudyLNext(EVENT_CACHE, &Index, &J_Error)) == PJERR) J_E("JudyLNext", &J_Error);
 	}
@@ -2831,7 +2829,6 @@ void __dns_telemetry_fire_counts(double ts) {
 	// fprintf(stderr, "The index used %lu bytes of memory, total cache cost: %lu expected=%lu found=%lu total=%lu\n", index_size, (cache_count*MAXKEY)+index_size, delta, cache_count, EVENT_TOTAL);
 
 	redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
-	LAST_SUBSCRIBERS = reply->integer;
 	freeReplyObject(reply);
 
       }
@@ -2845,6 +2842,7 @@ void __dns_telemetry_fire_counts(double ts) {
 	freeReplyObject(reply);
       }
 
+      /*
       if ((int)start % 55 == 0) {
 	if (REDIS == NULL || REDIS->err) {
 	  redisFree(REDIS);
@@ -2860,6 +2858,7 @@ void __dns_telemetry_fire_counts(double ts) {
 	  // fprintf(stderr, "Renewed REDIS connection\n");
 	}
       }
+      */
 
     }
 

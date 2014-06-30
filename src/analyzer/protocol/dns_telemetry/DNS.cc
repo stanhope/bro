@@ -341,8 +341,9 @@ int     LAST_SUBSCRIBERS = 0;
 redisContext *REDIS = NULL;
 
 static void redis_init() {
-  struct timeval timeout = { 1, 500000 }; // 1.5 seconds
-  REDIS = redisConnectWithTimeout("127.0.0.1", 6379, timeout);
+  // struct timeval timeout = { 1, 500000 }; // 1.5 seconds
+  // REDIS = redisConnectWithTimeout("127.0.0.1", 6379, timeout);
+  REDIS = redisConnect("127.0.0.1", 6379);
   if (REDIS == NULL || REDIS->err) {
     if (REDIS) {
       printf("Connection error: %s\n", REDIS->errstr);
@@ -351,6 +352,8 @@ static void redis_init() {
       printf("Connection error: can't allocate redis context\n");
     }
     exit(1);
+  } else {
+    redisEnableKeepAlive(REDIS);
   }
 
 }
@@ -2747,8 +2750,6 @@ void __dns_telemetry_fire_counts(double ts) {
     statsd_prepare(STATSD_LINK, (char*)"dns_reply", CNTS.reply, (char*)"c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_A", CNTS.A, (char*)"c", 1.0, tmp, MAX_LINE_LEN, 1);
-    strcat(pkt, tmp);
-    statsd_prepare(STATSD_LINK, (char*)"dns_AAAA", CNTS.AAAA, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_AAAA", CNTS.AAAA, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);

@@ -160,6 +160,10 @@ public:
 protected:
 	int qlen;
 	int rlen;
+	double start_time;
+	uint32_t client_subnet;
+	uint8 client_subnet_netmask;
+	uint8 client_qtype;
 
 	int EndMessage(DNS_Telemetry_MsgInfo* msg);
 
@@ -182,6 +186,7 @@ protected:
 			 u_char*& label, int& label_len,
 			 const u_char* msg_start);
 
+	uint8 ExtractByte(const u_char*& data, int& len);
 	uint16 ExtractShort(const u_char*& data, int& len);
 	uint32 ExtractLong(const u_char*& data, int& len);
 

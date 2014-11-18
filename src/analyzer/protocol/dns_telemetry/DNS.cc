@@ -35,13 +35,10 @@
 #include "sds.c"
 
 static char MY_NODE_ID[10] = "BEACON_ID";
+char BEACON_DOMAIN[256] = "jisusaiche.info";
 statsd_link *STATSD_LINK;
 #define MAX_LINE_LEN 200
 #define PKT_LEN 1400
-
-void __dns_telemetry_set_node_id(const char* id) {
-  strcpy(MY_NODE_ID, id);
-}
 
 using namespace analyzer::dns_telemetry;
 
@@ -188,6 +185,10 @@ PDict(ZoneStats) telemetry_zone_stats;
 PDict(AnchorPoint) telemetry_anchor_map;
 
 // #define DEBUG_ROTATE_LOGGING 
+// #define DEBUG_PACKET_DATA
+// #define DEBUG_REDIS_PUB
+
+#define MAX_LOG_BUFFER 1024*1024
 
 bool do_counts = false;
 bool do_totals = false;
@@ -201,8 +202,7 @@ bool do_details_all = false;
 uint sample_rate = 1;
 bool do_details_statsd = false;
 bool do_details_redis = false;
-
-#define MAX_LOG_BUFFER 1024*1024
+bool do_counts_redis = false;
 
 // We support three types of detail logging
 //
@@ -270,6 +270,14 @@ PDict(QueryClient) QUERY_CLIENTS;
 CurCounts CNTS;
 CurCounts TOTALS;
 
+void __dns_telemetry_set_node_id(const char* id) {
+  if (strlen(id) != 4) {
+    fprintf(stderr, "ERROR: NODE_ID %s MUST be 4 characters ONLY!\n", id);
+    exit(1);
+  }
+  strcpy(MY_NODE_ID, id);
+}
+
 // ----------------------------------------------------
 // ----------------------------------------------------
 
@@ -296,7 +304,7 @@ int parseLine(char* line){
 }
     
 
-static int getValues(int* VIRT, int* RES, int* DATA, int* FD, int* SHARE, int* PEAK){
+static int getValues(int* VIRT, int* RES, int* DATA, int* FD){
   //Note: this value is in KB!
   FILE* file = fopen("/proc/self/status", "r");
   int result = -1;
@@ -313,12 +321,6 @@ static int getValues(int* VIRT, int* RES, int* DATA, int* FD, int* SHARE, int* P
     else if (strncmp(line, "VmData:", 7) == 0){
       *DATA = parseLine(line);
     }
-    else if (strncmp(line, "VmLib:", 6) == 0){
-      *SHARE = parseLine(line);
-    }
-    else if (strncmp(line, "VmPeak:", 7) == 0){
-      *PEAK = parseLine(line);
-    }
     else if (strncmp(line, "FDSize:", 7) == 0){
       *FD = parseLine(line);
     }
@@ -331,19 +333,28 @@ static int getValues(int* VIRT, int* RES, int* DATA, int* FD, int* SHARE, int* P
 // Redis Utils
 // -------------------------
 
+Pvoid_t CLIENT_CACHE = (Pvoid_t) NULL;
+Word_t  CLIENT_TOTAL = 0;
+Word_t  CLIENT_COUNT = 0;
+const char* CLIENT_CHANNEL = "clientip";
+
+struct Client_IP_Info {
+  char addr[40];
+  uint port;
+  uint id;
+};
+
 Pvoid_t EVENT_CACHE = (Pvoid_t) NULL;
 Word_t  EVENT_TOTAL = 0;
 Word_t  EVENT_COUNT = 0;
 const char* EVENT_CHANNEL = "beacon";
 #define MAXVAL 32
-int     LAST_SUBSCRIBERS = 0;
 
 redisContext *REDIS = NULL;
 
 static void redis_init() {
-  // struct timeval timeout = { 1, 500000 }; // 1.5 seconds
-  // REDIS = redisConnectWithTimeout("127.0.0.1", 6379, timeout);
-  REDIS = redisConnect("127.0.0.1", 6379);
+  struct timeval timeout = { 1, 500000 }; // 1.5 seconds
+  REDIS = redisConnectWithTimeout("127.0.0.1", 6379, timeout);
   if (REDIS == NULL || REDIS->err) {
     if (REDIS) {
       printf("Connection error: %s\n", REDIS->errstr);
@@ -351,15 +362,15 @@ static void redis_init() {
     } else {
       printf("Connection error: can't allocate redis context\n");
     }
-    exit(1);
+    // exit(1);
   } else {
-    redisEnableKeepAlive(REDIS);
+    double now = current_time();
+    fprintf(stderr, "%f redis initialized\n", now);
   }
 
 }
 
 static void redis_term() {
-  fprintf(stderr, "Closing redis connection\n");
   if (REDIS != NULL) {
     redisFree(REDIS);
     REDIS = NULL;
@@ -381,6 +392,7 @@ AnchorMapUpdater::AnchorMapUpdater(char* _fname, double _interval) {
   fprintf(stderr, "%f statsd_init NODE=%s\n", now, MY_NODE_ID);
   STATSD_LINK = statsd_init_with_namespace("127.0.0.1", 8125, MY_NODE_ID);
   redis_init();
+  fprintf(stderr, "%f beacon_domain=%s\n", current_time(), BEACON_DOMAIN);
 }
 
 AnchorMapUpdater::~AnchorMapUpdater() {
@@ -421,9 +433,67 @@ DNS_Telemetry_Interpreter::DNS_Telemetry_Interpreter(analyzer::Analyzer* arg_ana
 	analyzer = arg_analyzer;
 	}
 
+#define ASCII_LINELENGTH 300
+#define HEXDUMP_BYTES_PER_LINE 16
+#define HEXDUMP_SHORTS_PER_LINE (HEXDUMP_BYTES_PER_LINE / 2)
+#define HEXDUMP_HEXSTUFF_PER_SHORT 5 /* 4 hex digits and a space */
+#define HEXDUMP_HEXSTUFF_PER_LINE  (HEXDUMP_HEXSTUFF_PER_SHORT * HEXDUMP_SHORTS_PER_LINE)
+
+void
+hex_and_ascii_print_with_offset(register const char *ident, register const u_char *cp, register u_int length, register u_int oset)
+{
+  register u_int i;
+  register int s1, s2;
+  register int nshorts;
+  char hexstuff[HEXDUMP_SHORTS_PER_LINE*HEXDUMP_HEXSTUFF_PER_SHORT+1], *hsp;
+  char asciistuff[ASCII_LINELENGTH+1], *asp;
+
+  nshorts = length / sizeof(u_short);
+  i = 0;
+  hsp = hexstuff; asp = asciistuff;
+  while (--nshorts >= 0) {
+    s1 = *cp++;
+    s2 = *cp++;
+    (void)snprintf(hsp, sizeof(hexstuff) - (hsp - hexstuff),
+		   " %02x%02x", s1, s2);
+    hsp += HEXDUMP_HEXSTUFF_PER_SHORT;
+    *(asp++) = (isgraph(s1) ? s1 : '.');
+    *(asp++) = (isgraph(s2) ? s2 : '.');
+    i++;
+    if (i >= HEXDUMP_SHORTS_PER_LINE) {
+      *hsp = *asp = '\0';
+      (void)printf("%s0x%04x: %-*s  %s",
+		   ident, oset, HEXDUMP_HEXSTUFF_PER_LINE,
+		   hexstuff, asciistuff);
+      i = 0; hsp = hexstuff; asp = asciistuff;
+      oset += HEXDUMP_BYTES_PER_LINE;
+    }
+  }
+  if (length & 1) {
+    s1 = *cp++;
+    (void)snprintf(hsp, sizeof(hexstuff) - (hsp - hexstuff),
+		   " %02x", s1);
+    hsp += 3;
+    *(asp++) = (isgraph(s1) ? s1 : '.');
+    ++i;
+  }
+  if (i > 0) {
+    *hsp = *asp = '\0';
+    (void)printf("%s0x%04x: %-*s  %s",
+		 ident, oset, HEXDUMP_HEXSTUFF_PER_LINE,
+		 hexstuff, asciistuff);
+  }
+}
+
+void hex_and_ascii_print(register const char *ident, register const u_char *cp, register u_int length)
+{
+  hex_and_ascii_print_with_offset(ident, cp, length, 0);
+  fflush(stderr);
+}
+
 int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_query)
-	{
-	int hdr_len = sizeof(DNS_RawMsgHdr);
+{
+        int hdr_len = sizeof(DNS_RawMsgHdr);
 
 	if ( len < hdr_len )
 		{
@@ -436,7 +506,11 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 	qlen = 0;
 	rlen = 0;
 
-	// fprintf(stderr, "Message %f\n", network_time);
+	if (is_query) {
+	  client_subnet_netmask = 0;
+	  client_subnet = 0;
+	  start_time = network_time;
+	}
 
 	if (do_counts) {
 	  if (is_query) {
@@ -476,6 +550,18 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 
 	// if (is_query) fprintf(stderr, "ParseMessage len=%d\n", len);
 
+	char client_addr[40];
+	const char* s_orig_addr = analyzer->Conn()->OrigAddr().AsString().c_str();
+	strcpy(client_addr, s_orig_addr);
+
+#ifdef DEBUG_PACKET_DATA
+	if (is_query && strstr(s_orig_addr, "10.") == NULL) {
+	  printf("Message %f ip=%s data=%p len=%d", network_time, client_addr, data, len);
+	  hex_and_ascii_print("\n\t", data, len);
+	  printf("\n");
+	}
+#endif
+
 	data += hdr_len;
 	len -= hdr_len;
 
@@ -485,15 +571,15 @@ int DNS_Telemetry_Interpreter::ParseMessage(const u_char* data, int len, int is_
 		return 0;
 		}
 
-	/*
 
+
+	/*
 	if ( ! ParseAnswers(&msg, msg.ancount, DNS_ANSWER,
 				data, len, msg_start) )
 		{
 		EndMessage(&msg);
 		return 0;
 		}
-
 	*/
 
 	analyzer->ProtocolConfirmation();
@@ -595,6 +681,14 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   // We'll calculte TLZ (apex) based on anchor map while extracting the name.
   // Since we have to do the lookup into the ZoneMap, calculate that as well so as to avoid an extra lookup
 
+#ifdef DEBUG_PACKET_DATA
+if (is_query) {
+  printf("-- ParseQuestion data=%p len=%d --", data, len);
+  hex_and_ascii_print("\n\t", data, len);
+  printf("\n");
+}
+#endif
+
   char tlz [513];
   AnchorPoint* anchor_entry = 0;
   u_char* name_end = ExtractName(data, len, name, name_len, msg_start, tlz, (void**)&anchor_entry);
@@ -609,11 +703,9 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       return 0;
     }
 
-  // fprintf(stderr, "..ParseQuestion qname=%s len=%d tlz=%s anchor=%p query=%d rcode=%d id=%d\n", name, len, tlz, anchor_entry, is_query, msg->rcode, msg->id);
-
-  const char* s_addr = analyzer->Conn()->OrigAddr().AsString().c_str();
-  char s_orig_addr[32];
-  strcpy(s_orig_addr, s_addr);	// save copy Conn() calls will reset this pointer
+  char client_addr[40];
+  const char* s_orig_addr = analyzer->Conn()->OrigAddr().AsString().c_str();
+  strcpy(client_addr, s_orig_addr);
 
   // Ignore stats on requests originating on the 10 net.
   bool skip = false;
@@ -622,6 +714,19 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
   }
 
   if (!skip) {
+
+    RR_Type qtype = RR_Type(ExtractShort(data, len));
+
+    if (is_query) {
+
+      client_qtype = qtype;
+      int qclass = ExtractShort(data,len);
+#ifdef DEBUG_PACKET_DATA
+      printf("..ParseQuestion ip=%s qname=%s len=%d tlz=%s anchor=%p query=%d qtype=%d qclass=%d id=%x arcount=%d len=%d", client_addr, name, len, tlz, anchor_entry, is_query, qtype, qclass, msg->id,msg->arcount, len);
+      hex_and_ascii_print("\n\t", data, len);
+      printf("\n");
+#endif
+    }
 
     bool local_do_counts = do_counts;
     bool local_do_zone_stats = do_zone_stats;
@@ -634,6 +739,19 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     bool do_zone_details = false;
     CurCounts* custom_stats= 0;
     bro_int_t owner_id = 0;
+
+    if (strstr((char*)name, BEACON_DOMAIN) != NULL) {
+      char temp[513];
+      strcpy(temp, (char*)name);
+      char* custid = strtok(temp, ".");
+      char* custdata = strtok(NULL, ".");
+      char* beacon = strtok(NULL, ".");
+      sprintf(tlz, "%s.%s", custid, BEACON_DOMAIN);
+#ifdef DEBUG_PACKET_DATA
+      printf("....tlz=%s\n", tlz);
+#endif
+    }
+
     HashKey* zone_hash = new HashKey(tlz);
 
     if (local_do_zone_stats && dns_telemetry_zone_info) {
@@ -755,13 +873,14 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
     }
 
     if (local_do_owner_stats && is_query) {
+
       // NOTE: The owner_id may the actual zone's ... or the OTHER owner id (0)
       HashKey* key = new HashKey(owner_id);
       owner_stats = OWNER_INFO.Lookup(key);
       if (owner_stats == 0) {
-	// We don't even have an OTHER stats collector yet, create one
+	// We don't have a stats collector yet, create one
 	owner_stats = new OwnerStats();
-	owner_stats->id = 0;
+	owner_stats->id = owner_id;
 	owner_stats->cnt = 0;
 	OWNER_INFO.Insert(key, owner_stats);
       }
@@ -804,7 +923,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	  qname_stat = telemetry_qname_stats.Lookup(qname_hash);
 	  if (!qname_stat) {
 	    qname_stat = new QnameStats();
-	    qname_stat->cnt = 0;
+	    qname_stat->cnt = 1;
 	    telemetry_qname_stats.Insert(qname_hash, qname_stat);
 	  } else {
 	    ++qname_stat->cnt;
@@ -825,9 +944,86 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
       dns_event = dns_telemetry_request;
 
-      RR_Type qtype = RR_Type(ExtractShort(data, len));
-      msg->qtype = qtype;
-    
+      if (msg->arcount > 0) {
+
+	// First pass at parsing EDNS client subnet in a query.
+	// Doesn't handle V6 addresses yet.
+
+	int ar_qnamelen = ExtractByte(data,len);
+	/*
+	printf("  AR qnamelen=>%x data=%p len=%d", ar_qnamelen, data, len);
+	hex_and_ascii_print("\n\t", data, len);
+	printf("\n");
+	*/
+	int ar_qtype = ExtractShort(data,len);
+	int ar_qclass = ExtractShort(data,len);
+	/*
+	printf("  ar_qtype=>%x ar_qclass=%x data=%p len=%d", ar_qtype, ar_qclass, data, len);
+	hex_and_ascii_print("\n\t", data, len);
+	printf("\n");
+	*/
+	int ar_ttl = ExtractLong(data,len);
+	/*
+	printf("  ar_ttl=>%x data=%p len=%d", ar_ttl, data, len);
+	hex_and_ascii_print("\n\t", data, len);
+	printf("\n");
+	*/
+	int ar_rdatalen = ExtractShort(data,len);
+	/*
+	printf("  ar_rdatalen=>%x data=%p len=%d", ar_rdatalen, data, len);
+	hex_and_ascii_print("\n\t", data, len);
+	printf("\n");
+	*/
+	if (len >= 1 && ar_rdatalen > 0) {
+
+	  uint16 option_code = ExtractShort(data,len);
+	  /*
+	  printf("  option_code=>%x data=%p len=%d", option_code, data, len);
+	  hex_and_ascii_print("\n\t", data, len);
+	  printf("\n");
+	  */
+
+	  uint16 option_len = ExtractShort(data,len);
+	  /*
+	  printf("  option_len=>%x data=%p len=%d", option_len, data, len);
+	  hex_and_ascii_print("\n\t", data, len);
+	  printf("\n");
+	  */
+	  uint16 family = ExtractShort(data,len);
+	  /*
+	  printf("  family=>%x data=%p len=%d", family, data, len);
+	  hex_and_ascii_print("\n\t", data, len);
+	  printf("\n");
+	  */
+	  uint8 source_netmask = ExtractByte(data,len);
+	  /*
+	  printf("  source_netmask=>%x data=%p len=%d", source_netmask, data, len);
+	  hex_and_ascii_print("\n\t", data, len);
+	  printf("\n");
+	  */
+	  uint8 scope_netmask = ExtractByte(data,len);
+	  /*
+	  printf("  scope=>%x data=%p len=%d", scope_netmask, data, len);
+	  hex_and_ascii_print("\n\t", data, len);
+	  printf("\n");
+	  */
+	  uint32_t client_subnet_val = 0;
+	  uint8 shift = 0;
+	  while(len > 0) {
+	    uint8 addr_part = ExtractByte(data,len);
+	    client_subnet_val |= addr_part << shift;
+	    shift += 8;
+	    /*
+	    printf("  len=%d part=%x val=%x", len, addr_part, client_subnet_val);
+	    hex_and_ascii_print("\n\t", data, len);
+	    printf("\n");
+	    */
+	  }
+	  client_subnet = client_subnet_val;
+	  client_subnet_netmask = source_netmask;
+	}
+      }
+
       if (local_do_zone_stats) {
 	++zone_stats->cnt;
 	if (msg->RD) {
@@ -839,28 +1035,23 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       string sAddrResp = resp_addr.AsString();
       const char* sAddrResp_cstr = sAddrResp.c_str();
 
-      // fprintf(stderr, "QUERY|ORIG: %s RESP: %s id=%d qtype=%u %f\n", s_orig_addr_cstr, sAddrResp_cstr, msg->id, msg->qtype, network_time);
-
       if (is_query) {
-	// Remember the client's IP. Use the message transaction id as the temporary key. 
-	// There is chance of a small/probablistic chance of collision. See BRO transaction id comments in their source code.
-	HashKey* client_hash = new HashKey((uint32)msg->id);
-	QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
-	if (query_client) {
-	  query_client->start = network_time;
-	  query_client->qtype = msg->qtype;
-	} else {
-	  query_client = new QueryClient();
-	  query_client->start = network_time;
-	  query_client->qtype = msg->qtype;
-	  QUERY_CLIENTS.Insert(client_hash, query_client);
+	const char* client_ip = analyzer->Conn()->OrigAddr().AsString().c_str();
+	// Add to client cache. Flushed when we dump per second stats
+	char* val = (char*)malloc(128);
+	sprintf(val, "%f,%s,%u,%d", network_time, client_ip, analyzer->Conn()->OrigPort(), msg->id);
+	PWord_t PV = NULL;
+	++CLIENT_COUNT;
+	JError_t J_Error;
+	if (((PV) = (PWord_t)JudyLIns(&CLIENT_CACHE, CLIENT_COUNT, &J_Error)) == PJERR) {
+	  J_E("JudyLIns", &J_Error);
 	}
-	delete client_hash;
+	*PV = (Word_t)val;
       }
 
       if (is_query && do_client_stats) {
 
-	HashKey* client_hash = new HashKey(s_orig_addr);
+	HashKey* client_hash = new HashKey(client_addr);
 	int* client_idx = telemetry_client_stats.Lookup(client_hash);
 	if (client_idx) {
 	  ++(*client_idx);
@@ -878,14 +1069,15 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       }
 
       if (local_do_counts) {
+
 	switch (qtype) 
 	  {
 	  case TYPE_A:
-	    // fprintf(stderr, "QUERY|qtype=%u %f\n", qtype, network_time);
 	    ++CNTS.A;
 	    ++TOTALS.A;
-	    if (custom_stats) 
+	    if (custom_stats) {
 	      ++custom_stats->A;
+	    }
 	    if (local_do_qname_stats)
 	      ++qname_stat->A;
 	    if (do_zone_stats)
@@ -988,7 +1180,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 
 	      if (do_anyrd_stats) {
 		char anyrd_key[560];
-		sprintf(anyrd_key, "%s|%s", s_orig_addr, name);
+		sprintf(anyrd_key, "%s|%s", client_addr, name);
 		HashKey* anyrd_hash = new HashKey(anyrd_key);
 		// fprintf(stderr, "ANYRD key=%s len=%u hash_key=%s key_size=%d\n", anyrd_key, (unsigned int)strlen(anyrd_key), (const char*)anyrd_hash->Key(), anyrd_hash->Size());
 		int* count_idx = telemetry_anyrd_counts.Lookup(anyrd_hash);
@@ -1016,6 +1208,11 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       }
     }
     else if ( msg->QR == 1 &&  msg->ancount == 0 && msg->nscount == 0 && msg->arcount == 0 ) {
+
+#ifdef DEBUG_PACKET_DATA
+	fprintf(stderr, "..request with failure\n");
+#endif
+
       // Service rejected in some fashion, and it won't be reported
       // via a returned RR because there aren't any.
       dns_event = dns_telemetry_rejected;
@@ -1033,23 +1230,12 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       string resp_addr = analyzer->Conn()->RespAddr().AsString();
       const char* s_resp_addr = resp_addr.c_str();
 
-      HashKey* client_hash = new HashKey((uint32)msg->id);
-      QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
-      double start_time = 0;
-      uint orig_qtype = 0;
-      if (query_client) {
-	start_time = query_client->start;
-	orig_qtype = query_client->qtype;
-	// TODO: Delete? Do we care. If we overlap on a 32bit int we're just eating memory
-      }
-      delete client_hash;
+      uint orig_qtype = qtype;
       uint t2r = (network_time - start_time)*1000000; // As unsigned micro seconds!
 
       CNTS.T2R_min = CNTS.T2R_min == 0 ? t2r : min(CNTS.T2R_min, t2r);
       CNTS.T2R_max = max(CNTS.T2R_max, t2r);
       CNTS.T2R_avg += t2r;
-
-      // fprintf(stderr, "..ORIG qtype=%u A T2R %f\n", orig_qtype, network_time);
 
       switch (orig_qtype) {
       case TYPE_A:
@@ -1093,16 +1279,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       // A REPLY. We don't do details until we've received the reply because of what we want to includes as part of that.
       dns_event = dns_telemetry_query_reply;
 
-      HashKey* client_hash = new HashKey((uint32)msg->id);
-      QueryClient* query_client = QUERY_CLIENTS.Lookup(client_hash);
-      double start_time = 0;
-      uint orig_qtype = 0;
-      if (query_client) {
-	start_time = query_client->start;
-	orig_qtype = query_client->qtype;
-	// TODO: Delete? Do we care. If we overlap on a 32bit int we're just eating memory
-      }
-      delete client_hash;
+      uint orig_qtype = qtype;
       uint t2r = (network_time - start_time)*1000000; // As unsigned micro seconds!
     
       CNTS.T2R_min = CNTS.T2R_min == 0 ? t2r : min(CNTS.T2R_min, t2r);
@@ -1153,33 +1330,54 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	}
       }
 
-      if (do_details_redis && anchor_entry != 0) {
+      if (do_details_redis) {
 
-	char beacon[256];  
-	strcpy(beacon, (char*)name);
-	char* saveptr;
-	strtok_r(beacon, ".", &saveptr);
-	char* cust_data = strtok_r(NULL, ".", &saveptr);
-	char* cust_id = strtok_r(NULL, ".", &saveptr);
-	
-	char redis_cmd[256];
+	if (anchor_entry != 0) {
+	  char cache_beacon[256];  
+	  strcpy(cache_beacon, (char*)name);
+
+	  char* saveptr;
+	  /*
+	    strtok_r(beacon, ".", &saveptr);
+	    char* cust_data = strtok_r(NULL, ".", &saveptr);
+	    char* cust_id = strtok_r(NULL, ".", &saveptr);
+	  */
+	  char* cust_id = strtok_r(cache_beacon, ".", &saveptr);
+	  char* cust_data = strtok_r(NULL, ".", &saveptr);
+	  char* beacon = strtok_r(NULL, ".", &saveptr);
+
+	  char s_client_subnet[32];
+	  if (client_subnet == 0) {
+	    strcpy(s_client_subnet, "-");
+	  } else {
+	    struct in_addr client_subnet_addr;
+	    client_subnet_addr.s_addr = client_subnet;
+	    sprintf(s_client_subnet, "%s/%d", inet_ntoa(client_subnet_addr), client_subnet_netmask);
+	  }
+
+	  char redis_cmd[256];
 #if PUBLISH_REALTIME
-	sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id, cust_data);
-	redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
-	freeReplyObject(reply);
+	  sprintf(redis_cmd, "PUBLISH beacon %f,D,%s,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,client_addr,beacon,cust_id, cust_data,s_client_subnet);
+	  redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
+	  freeReplyObject(reply);
 #else
-	// Add to event cache. Flushed when we dump per second stats
-	char* val = (char*)malloc(256);
-	sprintf(val, "%f,D,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,s_orig_addr,beacon,cust_id,cust_data);
-	PWord_t PV = NULL;
-	++EVENT_COUNT;
-	// fprintf(stderr, "%s %lu\n", val, EVENT_COUNT);
-	JError_t J_Error;
-	if (((PV) = (PWord_t)JudyLIns(&EVENT_CACHE, EVENT_COUNT, &J_Error)) == PJERR) {
-	  J_E("JudyLIns", &J_Error);
-	}
-	*PV = (Word_t)val;
+	  // Add to event cache. Flushed when we dump per second stats
+	  char* val = (char*)malloc(256);
+	  sprintf(val, "%f,D,%s,%s,%s,%s,%s,%s", network_time,MY_NODE_ID,client_addr,beacon,cust_id,cust_data,s_client_subnet);
+	  PWord_t PV = NULL;
+	  ++EVENT_COUNT;
+#ifdef DEBUG_REDIS_PUB
+	  fprintf(stderr, "REDIS(cache ev_count=%lu) %s\n", EVENT_COUNT, val);
 #endif
+	  JError_t J_Error;
+	  if (((PV) = (PWord_t)JudyLIns(&EVENT_CACHE, EVENT_COUNT, &J_Error)) == PJERR) {
+	    J_E("JudyLIns", &J_Error);
+	  }
+	  *PV = (Word_t)val;
+#endif
+	} else {
+	  printf("NO ANCHOR ENTRY, not capturing for redis\n");
+	}
       }
 
       if (do_details_statsd && anchor_entry != 0) {
@@ -1207,9 +1405,21 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
 	string resp_addr = analyzer->Conn()->RespAddr().AsString();
 	const char* s_resp_addr = resp_addr.c_str();
 
-	// string orig_addr = analyzer->Conn()->OrigAddr().AsString();
-	// const char* s_orig_addr = orig_addr.c_str();
-	// fprintf(stderr, "REPLY|ORIG: %s RESP: %s id=%d qtype=%u rcode=%u %f %f t2r=%u\n", s_orig_addr, s_resp_addr, msg->id, orig_qtype, msg->rcode, network_time, start_time, t2r);
+	string orig_addr = analyzer->Conn()->OrigAddr().AsString();
+	const char* s_orig_addr = orig_addr.c_str();
+
+	// fprintf(stderr, "%s REPLY|ORIG: %s RESP: %s id=%d qtype=%u rcode=%u %f %f t2r=%u\n", name, s_orig_addr, s_resp_addr, msg->id, orig_qtype, msg->rcode, network_time, start_time, t2r);
+	/*
+	char s_client_subnet[32];
+	if (client_subnet == 0) {
+	  strcpy(s_client_subnet, "-");
+	} else {
+	  struct in_addr client_subnet_addr;
+	  client_subnet_addr.s_addr = client_subnet;
+	  sprintf(s_client_subnet, "%s/%d", inet_ntoa(client_subnet_addr), client_subnet_netmask);
+	}
+	*/
+	//fprintf(stderr, "%s,%d,%s,%s\n", name, client_qtype, s_orig_addr, s_client_subnet);
 
 	char log_line[256];
 	sprintf(log_line, "%f,%s,%u,%u,%d,%s,%s,%u\n", network_time,(char*)name,orig_qtype,msg->rcode,msg->ttl,s_orig_addr,s_resp_addr,msg->opcode);
@@ -1386,11 +1596,7 @@ int DNS_Telemetry_Interpreter::ParseQuestion(DNS_Telemetry_MsgInfo* msg,
       }
     }
     delete zone_hash;
-  } 
-
-  // Consume the unused type/class.
-  (void) ExtractShort(data, len);
-  (void) ExtractShort(data, len);
+  }
 
   return 1;
 }
@@ -1613,6 +1819,16 @@ int DNS_Telemetry_Interpreter::ExtractLabel(const u_char*& data, int& len,
 	return label_len;
 	}
 
+uint8 DNS_Telemetry_Interpreter::ExtractByte(const u_char*& data, int& len)
+	{
+	if ( len < 1 )
+		return 0;
+	uint8 val = data[0];
+	++data;
+	--len;
+	return val;
+	}
+
 uint16 DNS_Telemetry_Interpreter::ExtractShort(const u_char*& data, int& len)
 	{
 	if ( len < 2 )
@@ -1810,6 +2026,8 @@ int DNS_Telemetry_Interpreter::ParseRR_EDNS(DNS_Telemetry_MsgInfo* msg,
 	{
 	// We need a pair-value set mechanism here to dump useful information
 	// out to the policy side of the house if rdlength > 0.
+
+	  fprintf(stderr, "ParseRR_EDNS\n");
 
 	if ( dns_telemetry_EDNS_addl && ! msg->skip_event )
 		{
@@ -2641,7 +2859,7 @@ static int last_FD = 0;
 void __dns_telemetry_fire_counts(double ts) {
   if ( dns_telemetry_count ) {
     double start = current_time();
-    double lag = start - ts;
+    double lag = start - ts;	  
     val_list* vl = buildCountsRecord(&CNTS, 0, ts, lag, sample_rate, false);
     if (lag > 2) {
       fprintf(stderr, "WARN: Lagging on real-time processing. TODO, send event up to script land\n");
@@ -2651,98 +2869,91 @@ void __dns_telemetry_fire_counts(double ts) {
     char tmp[MAX_LINE_LEN];
     pkt[0]=0;
 
-    ////    int self_VIRT = 0, self_RES = 0, self_DATA = 0, self_SHARE = 0, self_FD = 0, self_PEAK = 0;
-    ////    getValues(&self_VIRT, &self_RES, &self_DATA, &self_FD, &self_SHARE, &self_PEAK);
-    ////    
-    ////    struct rusage self_usage;
-    ////    getrusage(RUSAGE_SELF, &self_usage);
-    ////    double utime = self_usage.ru_utime.tv_sec + self_usage.ru_utime.tv_usec/1000000.0;
-    ////    double stime = self_usage.ru_stime.tv_sec + self_usage.ru_stime.tv_usec/1000000.0;
-    ////    
-    ////    // Calc delta since last interval for key per process metrics
-    ////    double delta_utime = 100 * (utime - last_utime);
-    ////    double delta_stime = 100 * (stime - last_stime);
-    ////    double total_time = delta_utime + delta_stime;
-    ////    long delta_nsignals = self_usage.ru_nsignals - last_signals;
-    ////    long delta_inblock = self_usage.ru_inblock - last_inblock;
-    ////    long delta_oublock = self_usage.ru_oublock - last_oublock;
-    ////    long delta_nswap = self_usage.ru_nswap - last_nswap;
-    ////    long delta_minflt = self_usage.ru_minflt - last_minflt;
-    ////    long delta_majflt = self_usage.ru_majflt - last_majflt;
-    ////    int delta_fd = self_FD - last_FD;
-    ////    long delta_nvcsw = self_usage.ru_nvcsw - last_nvcsw;
-    ////    long delta_nivcsw = self_usage.ru_nivcsw - last_nivcsw;
-    ////    
-    ////    last_utime = utime;
-    ////    last_stime = stime;
-    ////    last_signals = self_usage.ru_nsignals;
-    ////    last_minflt = self_usage.ru_minflt;
-    ////    last_majflt = self_usage.ru_majflt;
-    ////    last_inblock = self_usage.ru_inblock;
-    ////    last_oublock = self_usage.ru_oublock;
-    ////    last_nswap = self_usage.ru_nswap;
-    ////    last_FD = self_FD;
-    ////    last_nvcsw = self_usage.ru_nvcsw;
-    ////    last_nivcsw = self_usage.ru_nivcsw;
-    ////    
-    ////    fprintf(stderr, "cpu bro CPU%% (tot/usr/sys) %f/%f/%f MEM (VIRT/RES/DATA) %d/%d/%d fd=%d swap=%ld inblock=%ld oublock=%ld minflt=%ld majflt=%ld signals=%ld vcsw=%ld ivcsw=%ld\n\n", 
-    ////	    total_time, delta_utime, delta_stime, self_VIRT, self_RES, self_DATA, delta_fd, delta_nswap, delta_inblock, delta_oublock, delta_minflt, delta_majflt, delta_nsignals, delta_nvcsw, delta_nivcsw);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_tot", total_time, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_sys", delta_stime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_usr", delta_utime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_vrt", self_VIRT, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_res", self_RES, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_dat", self_DATA, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_shr", self_SHARE, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_mem_peak", self_PEAK, "g", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_fd", delta_fd, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_nswap", delta_nswap, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_minflt", delta_minflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_majflt", delta_majflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_inblock", delta_inblock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_oublock", delta_oublock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_signals", delta_nsignals, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_signals", delta_nsignals, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_vcsw", delta_nvcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
-    ////
-    ////    statsd_prepare(STATSD_LINK, (char*)"bro_ivcsw", delta_nivcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
-    ////    strcat(pkt, tmp);
+    int self_VIRT = 0, self_RES = 0, self_DATA = 0, self_FD = 0;
+    getValues(&self_VIRT, &self_RES, &self_DATA, &self_FD);
 
-    statsd_prepare(STATSD_LINK, (char*)"bro_lag", (int)(lag*1000000), "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    struct rusage self_usage;
+    getrusage(RUSAGE_SELF, &self_usage);
+    double utime = self_usage.ru_utime.tv_sec + self_usage.ru_utime.tv_usec/1000000.0;
+    double stime = self_usage.ru_stime.tv_sec + self_usage.ru_stime.tv_usec/1000000.0;
+
+    // Calc delta since last interval for key per process metrics
+    double delta_utime = 100 * (utime - last_utime);
+    double delta_stime = 100 * (stime - last_stime);
+    double total_time = delta_utime + delta_stime;
+    long delta_nsignals = self_usage.ru_nsignals - last_signals;
+    long delta_inblock = self_usage.ru_inblock - last_inblock;
+    long delta_oublock = self_usage.ru_oublock - last_oublock;
+    long delta_nswap = self_usage.ru_nswap - last_nswap;
+    long delta_minflt = self_usage.ru_minflt - last_minflt;
+    long delta_majflt = self_usage.ru_majflt - last_majflt;
+    int delta_fd = self_FD - last_FD;
+    long delta_nvcsw = self_usage.ru_nvcsw - last_nvcsw;
+    long delta_nivcsw = self_usage.ru_nivcsw - last_nivcsw;
+
+    last_utime = utime;
+    last_stime = stime;
+    last_signals = self_usage.ru_nsignals;
+    last_minflt = self_usage.ru_minflt;
+    last_majflt = self_usage.ru_majflt;
+    last_inblock = self_usage.ru_inblock;
+    last_oublock = self_usage.ru_oublock;
+    last_nswap = self_usage.ru_nswap;
+    last_FD = self_FD;
+    last_nvcsw = self_usage.ru_nvcsw;
+    last_nivcsw = self_usage.ru_nivcsw;
+
+#if 0
+    fprintf(stderr, "cpu bro CPU%% (tot/usr/sys) %f/%f/%f MEM (VIRT/RES/DATA) %d/%d/%d fd=%d swap=%ld inblock=%ld oublock=%ld minflt=%ld majflt=%ld signals=%ld vcsw=%ld ivcsw=%ld\n\n", 
+	    total_time, delta_utime, delta_stime, self_VIRT, self_RES, self_DATA, delta_fd, delta_nswap, delta_inblock, delta_oublock, delta_minflt, delta_majflt, delta_nsignals, delta_nvcsw, delta_nivcsw);
+#endif
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_tot", total_time, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_sys", delta_stime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_cpu_usr", delta_utime, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_mem_vrt", self_VIRT, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_mem_res", self_RES, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_mem_dat", self_DATA, "g", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_fd", delta_fd, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_nswap", delta_nswap, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_minflt", delta_minflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_majflt", delta_majflt, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_inblock", delta_inblock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_oublock", delta_oublock, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_signals", delta_nsignals, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_signals", delta_nsignals, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_vcsw", delta_nvcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    strcat(pkt, tmp);
+
+    statsd_prepare(STATSD_LINK, (char*)"bro_ivcsw", delta_nivcsw, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
 
     statsd_prepare(STATSD_LINK, (char*)"dns_request", CNTS.request, (char*)"c", 1.0, tmp, MAX_LINE_LEN, 1);
@@ -2753,9 +2964,9 @@ void __dns_telemetry_fire_counts(double ts) {
     strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_AAAA", CNTS.AAAA, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
-    statsd_prepare(STATSD_LINK, (char*)"dns_TCP", CNTS.TCP, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    statsd_prepare(STATSD_LINK, (char*)"dns_AAAA", CNTS.AAAA, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
-    statsd_prepare(STATSD_LINK, (char*)"dns_UDP", CNTS.UDP, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    statsd_prepare(STATSD_LINK, (char*)"dns_TCP", CNTS.TCP, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_noerror", CNTS.rcode_noerror, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
@@ -2765,9 +2976,7 @@ void __dns_telemetry_fire_counts(double ts) {
     strcat(pkt, tmp);
     statsd_prepare(STATSD_LINK, (char*)"dns_T2R_max", CNTS.T2R_max, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
-
-    uint avg = (CNTS.T2R_avg != 0 && CNTS.request != 0) ? CNTS.T2R_avg / CNTS.request : 0;
-    statsd_prepare(STATSD_LINK, (char*)"dns_T2R_avg", avg, "c", 1.0, tmp, MAX_LINE_LEN, 1);
+    statsd_prepare(STATSD_LINK, (char*)"dns_T2R_avg", CNTS.T2R_avg, "c", 1.0, tmp, MAX_LINE_LEN, 1);
     strcat(pkt, tmp);
     statsd_send(STATSD_LINK, pkt);
 
@@ -2780,6 +2989,7 @@ void __dns_telemetry_fire_counts(double ts) {
 	// Emit 32K msg at a time
 	char buffer[32*1024];
 	uint bufi = 0;
+
 	// Dump cached events and publish them
 	Word_t cache_count = 0;
 	PWord_t PV = NULL;
@@ -2789,8 +2999,6 @@ void __dns_telemetry_fire_counts(double ts) {
 	buffer[bufi] = 0;
 
 	Word_t Index;
-	// JLF(PV, EVENT_CACHE, Index);
-	// J_1P(PV,    EVENT_CACHE, &(Index), JudyLFirst, "JudyLFirst");
 	JError_t J_Error;
 	if (((PV) = (PWord_t)JudyLFirst(EVENT_CACHE, &Index, &J_Error)) == PJERR) J_E("JudyLFirst", &J_Error);
 	
@@ -2800,7 +3008,9 @@ void __dns_telemetry_fire_counts(double ts) {
 	  uint len = strlen(val);
 	  // fprintf(stderr, "  cached key: %lu val: %s\n", Index, val);
 	  if (bufi + len > sizeof(buffer)) {
-	    // fprintf(stderr, "%s\n", buffer);
+#ifdef DEBUG_REDIS_PUB
+	    fprintf(stderr, "REDIS(pub) %s\n", buffer);
+#endif
 	    redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
 	    freeReplyObject(reply);
 	    sprintf(buffer, "PUBLISH %s ", EVENT_CHANNEL);
@@ -2817,7 +3027,7 @@ void __dns_telemetry_fire_counts(double ts) {
 	  buffer[bufi] = 0;
 	  
 	  free((void*)val);
-
+	  // JLN(PV, EVENT_CACHE, Index);   // get next string
 	  JError_t J_Error;
 	  if (((PV) = (PWord_t)JudyLNext(EVENT_CACHE, &Index, &J_Error)) == PJERR) J_E("JudyLNext", &J_Error);
 	}
@@ -2826,41 +3036,85 @@ void __dns_telemetry_fire_counts(double ts) {
 	Word_t index_size;  
 	JLFA(index_size, EVENT_CACHE);
 	
-	// fprintf(stderr, "%s\n", buffer);
-	// fprintf(stderr, "The index used %lu bytes of memory, total cache cost: %lu expected=%lu found=%lu total=%lu\n", index_size, (cache_count*MAXKEY)+index_size, delta, cache_count, EVENT_TOTAL);
+#ifdef DEBUG_REDIS_PUB
+	fprintf(stderr, "REDIS(pub) %s\n", buffer);
+	fprintf(stderr, "The index used %lu bytes of memory, expected=%lu found=%lu total=%lu\n", index_size, delta, cache_count, EVENT_TOTAL);
+#endif
 
 	redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
 	freeReplyObject(reply);
 
       }
+    }
 
-      // Simple heartbeat to keep the channel alive 
-      if ((int)start % 30 == 0) {
-	char redis_cmd[256];
-	sprintf(redis_cmd, "PUBLISH beacon %f,A,%s,%s,%s,SUBSCRIBERS=%d", start,MY_NODE_ID,"127.0.0.0","BRO_PULSE",LAST_SUBSCRIBERS);
-	redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
-	LAST_SUBSCRIBERS = reply->integer;
+    if (do_counts_redis) {
+
+      Word_t delta = CLIENT_COUNT - CLIENT_TOTAL;
+      CLIENT_TOTAL = CLIENT_COUNT;
+
+      if (delta > 0) {
+	// Emit 32K msg at a time
+	char buffer[32*1024];
+	uint bufi = 0;
+
+	// Dump cached clients and publish them
+	Word_t cache_count = 0;
+	PWord_t PV = NULL;
+	
+	sprintf(buffer, "PUBLISH %s ", CLIENT_CHANNEL);
+	bufi = strlen(buffer);
+	buffer[bufi] = 0;
+
+	Word_t Index;
+	JError_t J_Error;
+	if (((PV) = (PWord_t)JudyLFirst(CLIENT_CACHE, &Index, &J_Error)) == PJERR) J_E("JudyLFirst", &J_Error);
+	
+	while (PV != NULL) {
+	  ++cache_count;
+	  const char* val = (const char*)*PV;
+	  uint len = strlen(val);
+	  if (bufi + len > sizeof(buffer)) {
+	    fprintf(stderr, "%s\n", buffer);
+	    redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+	    freeReplyObject(reply);
+	    sprintf(buffer, "PUBLISH %s ", CLIENT_CHANNEL);
+	    bufi = strlen(buffer);
+	    buffer[bufi] = 0;
+	  } 
+
+	  // Cache the value
+	  if (bufi > 30) {
+	    buffer[bufi++] = '|';
+	  }
+	  memcpy(buffer+bufi, (void*)*PV, len);
+	  bufi += len;
+	  buffer[bufi] = 0;
+	  
+	  free((void*)val);
+	  JError_t J_Error;
+	  if (((PV) = (PWord_t)JudyLNext(CLIENT_CACHE, &Index, &J_Error)) == PJERR) J_E("JudyLNext", &J_Error);
+	}
+	
+	// Cleanup array
+	Word_t index_size;  
+	JLFA(index_size, CLIENT_CACHE);
+	
+	fprintf(stderr, "%s\n", buffer);
+
+	redisReply *reply = (redisReply*)redisCommand(REDIS, buffer);
+	int subscribers = reply->integer;
 	freeReplyObject(reply);
+
+	// fprintf(stderr, "The client index used %lu bytes of memory, total cache cost: %lu expected=%lu found=%lu total=%lu subscribers=%d\n", index_size, (cache_count*40)+index_size, delta, cache_count, CLIENT_TOTAL, subscribers);
       }
+    }
 
-      /*
-      if ((int)start % 55 == 0) {
-	if (REDIS == NULL || REDIS->err) {
-	  redisFree(REDIS);
-	  REDIS = NULL;
-	}
-
-	struct timeval timeout = { 1, 500000 }; // 1.5 seconds
-	REDIS = redisConnectWithTimeout("127.0.0.1", 6379, timeout);
-	if (REDIS != NULL && REDIS->err) {
-	  fprintf(stderr, "Error renewing REDIS connection: %s\n", REDIS->errstr);
-	  redisFree(REDIS);
-	} else {
-	  // fprintf(stderr, "Renewed REDIS connection\n");
-	}
-      }
-      */
-
+    // Heartbeat the pubsub channel every 30 seconds                                                                                       
+    if ((int)start % 30 == 0) {
+      char redis_cmd[256];
+      sprintf(redis_cmd, "PUBLISH beacon %f,A,%s,127.0.0.1,DNS_PULSE", start,MY_NODE_ID);
+      redisReply *reply = (redisReply*)redisCommand(REDIS, redis_cmd);
+      freeReplyObject(reply);
     }
 
     mgr.Dispatch(new Event(dns_telemetry_count, vl), true);
@@ -2990,6 +3244,10 @@ FILE* file_rotate(const char* name, const char* to_name)
     fprintf(stderr, "file_rotate (open): can't open %s: %s\n", tmpname, strerror(errno));
     return 0;
   }
+
+#ifdef DEBUG_ROTATE_LOGGING
+  printf("file_rotate %s %s\n", name, to_name);
+#endif
 
   // Then move old file to and make sure it really gets created.
   struct stat dummy;

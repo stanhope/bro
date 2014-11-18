@@ -279,6 +279,10 @@ function dns_telemetry_set_sample_rate%(rate:count%): count
 function dns_telemetry_set_do_details%(enable:bool%): any
 %{
 	do_details = enable;
+	if (do_details && !dns_telemetry_detail_info) {
+	   fprintf(stderr, "FATAL ERROR: No dns_telemetry_detail_info event handler defined.\n");
+	   exit(1);
+	}
 	return 0;
 %}
 
@@ -297,12 +301,20 @@ function dns_telemetry_set_do_details_redis%(enable:bool%): any
 function dns_telemetry_set_do_totals%(enable:bool%): any
 %{
 	do_totals = enable;
+	if (!dns_telemetry_totals) {
+	   fprintf(stderr, "FATAL ERROR: No dns_telemetry_totals event handler defined.\n");
+//	   exit(1);
+	}
 	return 0;
 %}
 
 function dns_telemetry_set_do_zones%(enable:bool%): any
 %{
 	do_zone_stats = enable;
+	if (!dns_telemetry_zone_info) {
+	   fprintf(stderr, "FATAL ERROR: No dns_telemetry_zone_info event handler defined.\n");
+//	   exit(1);
+	}
 	return 0;
 %}
 
@@ -317,24 +329,40 @@ function dns_telemetry_load_anchor_map%(config_fname:string, details_fname:strin
 function dns_telemetry_set_do_owners%(enable:bool%): any
 %{
 	do_owner_stats = enable;
+	if (do_owner_stats && !dns_telemetry_owner_info) {
+	   fprintf(stderr, "FATAL ERROR: No dns_telemetry_owner_info event handler defined.\n");
+	   exit(1);
+	}
 	return 0;
 %}
 
 function dns_telemetry_set_do_qnames%(enable:bool%): any
 %{
 	do_qname_stats = enable;
+	if (do_qname_stats && !dns_telemetry_qname_info) {
+	   fprintf(stderr, "FATAL ERROR: No dns_telemetry_qname_info event handler defined.\n");
+	   exit(1);
+	}
 	return 0;
 %}
 
 function dns_telemetry_set_do_anyrd%(enable:bool%): any
 %{
 	do_anyrd_stats = enable;
+	if (do_anyrd_stats && !dns_telemetry_anyrd_info) {
+	   fprintf(stderr, "FATAL ERROR: No dns_telemetry_anyrd_info event handler defined.\n");
+	   exit(1);
+	}
 	return 0;
 %}
 
 function dns_telemetry_set_do_clients%(enable:bool%): any
 %{
 	do_client_stats = enable;
+	if (do_client_stats && !dns_telemetry_client_info) {
+	   fprintf(stderr, "FATAL ERROR: No dns_telemetry_client_info event handler defined.\n");
+	   exit(1);
+	}
 	return 0;
 %}
 
